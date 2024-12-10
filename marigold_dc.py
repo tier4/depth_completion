@@ -62,7 +62,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             image, processing_resolution=0, device=device, dtype=self.dtype
         )  # [N,3,PPH,PPW]
 
-        if sparse_depth.shape != image.shape[-2:]:
+        if sparse_depth.shape != original_resolution:
             raise ValueError(
                 f"Sparse depth dimensions ({sparse_depth.shape}) must match that of the image ({image.shape[-2:]})"
             )
