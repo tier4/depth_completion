@@ -16,7 +16,7 @@
 # Please find bibtex at: https://github.com/prs-eth/Marigold-DC#-citation
 # More information can be found at https://marigolddepthcompletion.github.io
 # ---------------------------------------------------------------------------------
-
+import logging
 import os
 import warnings
 import argparse
@@ -32,7 +32,7 @@ diffusers.utils.logging.disable_progress_bar()
 
 
 class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
-    def __call__(self, image, sparse_depth, num_inference_steps=50, seed=2024):  # noqa
+    def __call__(self, image, sparse_depth, num_inference_steps=50, processing_resolution=768, seed=2024):
         # Resolving variables
         device = self._execution_device
         generator = torch.Generator(device=device).manual_seed(seed)
@@ -59,7 +59,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
         # Preprocess input images
         image, padding, original_resolution = self.image_processor.preprocess(
-            image, processing_resolution=0, device=device, dtype=self.dtype
+            image, processing_resolution=processing_resolution, device=device, dtype=self.dtype
         )  # [N,3,PPH,PPW]
 
         if sparse_depth.shape != original_resolution:
@@ -75,7 +75,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         sparse_depth = torch.from_numpy(sparse_depth)[None, None].float()
         sparse_depth = sparse_depth.to(device)
         sparse_mask = sparse_depth > 0
-        print(f"Using {sparse_mask.int().sum().item()} guidance points")
+        logging.info(f"Using {sparse_mask.int().sum().item()} guidance points")
 
         # Set up optimization targets
 
@@ -86,8 +86,23 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         sparse_range = (sparse_depth[sparse_mask].max() - sparse_depth[sparse_mask].min()).item()
         sparse_lower = (sparse_depth[sparse_mask].min()).item()
 
-        def to_metric(d):
-            return (scale**2) * sparse_range * d + (shift**2) * sparse_lower
+        def affine_to_metric(depth):
+            return (scale**2) * sparse_range * depth + (shift**2) * sparse_lower
+
+        def latent_to_metric(latent):
+            affine_invariant_prediction = self.decode_prediction(latent)  # [E,1,PPH,PPW]
+            prediction = affine_to_metric(affine_invariant_prediction)
+            prediction = self.image_processor.unpad_image(prediction, padding)  # [E,1,PH,PW]
+            prediction = self.image_processor.resize_antialias(
+                prediction, original_resolution, "bilinear", is_aa=False
+            )  # [1,1,H,W]
+            return prediction
+
+        def loss_l1l2(input, target):
+            out_l1 = torch.nn.functional.l1_loss(input, target)
+            out_l2 = torch.nn.functional.mse_loss(input, target)
+            out = out_l1 + out_l2
+            return out
 
         optimizer = torch.optim.Adam(
             [
@@ -97,9 +112,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         )
 
         # Process the denoising loop
-
         self.scheduler.set_timesteps(num_inference_steps, device=device)
-
         for iter, t in enumerate(
             self.progress_bar(self.scheduler.timesteps, desc=f"Marigold-DC steps ({str(device)})...")
         ):
@@ -118,22 +131,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
             step_output = self.scheduler.step(noise, t, pred_latent, generator=generator)
 
-            # Preview the final output, clip, rescale, resize
+            # Preview the final output depth, compute loss with guidance, backprop
             pred_original_sample = step_output.pred_original_sample
-            current_x0_depth = self.decode_prediction(pred_original_sample)  # [1,1,h,w], range in [0,1]
-            resized_current_x0_depth = torch.nn.functional.interpolate(
-                current_x0_depth,
-                sparse_depth.shape[-2:],
-                mode="bilinear",
-                antialias=True,
-            )
-            resized_current_x0_depth = torch.clamp(resized_current_x0_depth, 0, 1)  # [1,1,h,w]
-
-            current_metric_estimate = to_metric(resized_current_x0_depth)  # [1,1,h,w]
-
-            def loss_l1l2(input, target):
-                return torch.nn.functional.l1_loss(input, target) + torch.nn.functional.mse_loss(input, target)
-
+            current_metric_estimate = latent_to_metric(pred_original_sample)
             loss = loss_l1l2(current_metric_estimate[sparse_mask], sparse_depth[sparse_mask])
             loss.backward()
 
@@ -148,23 +148,15 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
             with torch.no_grad():
                 pred_latent.data = self.scheduler.step(noise, t, pred_latent, generator=generator).prev_sample
-            del current_x0_depth, pred_original_sample, current_metric_estimate, step_output, resized_current_x0_depth, pred_epsilon, noise
+
+            del pred_original_sample, current_metric_estimate, step_output, pred_epsilon, noise
             torch.cuda.empty_cache()
 
         del image_latent
 
         # Decode predictions from latent into pixel space
         with torch.no_grad():
-            affine_invariant_prediction = self.decode_prediction(pred_latent)  # [E,1,PPH,PPW]
-            prediction = to_metric(affine_invariant_prediction).detach()
-
-        # Remove padding. The output shape is (PH, PW)
-        prediction = self.image_processor.unpad_image(prediction, padding)  # [E,1,PH,PW]
-
-        # Revert to the input resolution
-        prediction = self.image_processor.resize_antialias(
-            prediction, original_resolution, "bilinear", is_aa=False
-        )  # [1,1,H,W]
+            prediction = latent_to_metric(pred_latent.detach())
 
         # Prepare the final outputs
         prediction = self.image_processor.pt_to_numpy(prediction)  # [N,H,W,1]
@@ -183,18 +175,41 @@ def main():
     parser.add_argument("--in-depth", type=str, default="data/sparse_100.npy", help="Input sparse depth")
     parser.add_argument("--out-depth", type=str, default="data/dense_100.npy", help="Output dense depth")
     parser.add_argument("--num_inference_steps", type=int, default=50, help="Denoising steps")
+    parser.add_argument("--processing_resolution", type=int, default=768, help="Denoising resolution")
     parser.add_argument("--checkpoint", type=str, default=DEPTH_CHECKPOINT, help="Depth checkpoint")
     args = parser.parse_args()
 
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    num_inference_steps = args.num_inference_steps
+    processing_resolution = args.processing_resolution
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        if torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+        processing_resolution_non_cuda = 512
+        num_inference_steps_non_cuda = 10
+        if processing_resolution > processing_resolution_non_cuda:
+            logging.warning(f"CUDA not found: Reducing processing_resolution to {processing_resolution_non_cuda}")
+            processing_resolution = processing_resolution_non_cuda
+        if num_inference_steps > num_inference_steps_non_cuda:
+            logging.warning(f"CUDA not found: Reducing num_inference_steps to {num_inference_steps_non_cuda}")
+            num_inference_steps = num_inference_steps_non_cuda
 
     pipe = MarigoldDepthCompletionPipeline.from_pretrained(args.checkpoint, prediction_type="depth").to(device)
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
 
+    if not torch.cuda.is_available():
+        logging.warning(f"CUDA not found: Using a lightweight VAE")
+        del pipe.vae
+        pipe.vae = diffusers.AutoencoderTiny.from_pretrained("madebyollin/taesd").to(device)
+
     pred = pipe(
         image=Image.open(args.in_image),
         sparse_depth=np.load(args.in_depth),
-        num_inference_steps=args.num_inference_steps,
+        num_inference_steps=num_inference_steps,
+        processing_resolution=processing_resolution,
     )
 
     np.save(args.out_depth, pred)
