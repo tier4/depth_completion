@@ -63,11 +63,11 @@ python -m marigold_dc \
 
 🛠️ Customize other settings:
 - `--num_inference_steps <int>` specifies the number of diffusion inference steps.
-- `--checkpoint <path>` allows overriding the base monocular depth prediction checkpoint; can be a local path or a Hugging Face repository.
+- `--checkpoint <path>` allows overriding the base monocular depth estimation model checkpoint; can be a local path or a Hugging Face repository.
 
 ## 🏋️‍♂️ Training
 
-None — the method is purely test-time; refer to the paper for details.
+None — the method is purely test-time; please refer to the paper for more details.
 
 ## ⬇ Checkpoint cache
 By default, the [checkpoint](https://huggingface.co/prs-eth/marigold-depth-v1-0) is stored in the Hugging Face cache, 
