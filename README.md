@@ -3,6 +3,7 @@
 [![Website](https://img.shields.io/badge/%F0%9F%8C%BC%20Project%20-Website-blue)](https://marigolddepthcompletion.github.io)
 [![arXiv](https://img.shields.io/badge/arXiv-PDF-b31b1b)](http://arxiv.org/abs/2412.xxxxx)
 [![Hugging Face Space](https://img.shields.io/badge/🤗%20Hugging%20Face%20-Space-yellow)](https://huggingface.co/spaces/prs-eth/marigold-dc)
+[![License](https://img.shields.io/badge/License-Apache--2.0-929292)](https://www.apache.org/licenses/LICENSE-2.0)
 
 This repository represents the official implementation of the paper titled "Marigold-DC: Zero-Shot Monocular Depth Completion with Guided Diffusion".
 
@@ -96,6 +97,10 @@ of environments and handles even extremely sparse guidance effectively. Our resu
 monodepth priors greatly robustify depth completion: it may be better to view the task as recovering dense depth 
 from (dense) image pixels, guided by sparse depth; rather than as inpainting (sparse) depth, guided by an image.
 
+## 📢 News
+
+2024-12-18: Code release (this repository).
+
 ## 🎓 Citation
 ```bibtex
 @misc{viola2024marigolddc,
@@ -110,4 +115,4 @@ from (dense) image pixels, guided by sparse depth; rather than as inpainting (sp
 
 ## 🎫 License
 
-This code of this work is licensed under the Apache License, Version 2.0 (as defined in the [LICENSE](LICENSE.txt)).
+The code of this work is licensed under the Apache License, Version 2.0 (as defined in the [LICENSE](LICENSE.txt)).
