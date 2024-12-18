@@ -79,9 +79,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
         # Set up optimization targets
 
-        scale = torch.nn.Parameter(torch.ones(1, device=device), requires_grad=True)
-        shift = torch.nn.Parameter(torch.ones(1, device=device), requires_grad=True)
-        pred_latent = torch.nn.Parameter(pred_latent, requires_grad=True)
+        scale = torch.nn.Parameter(torch.ones(1, device=device))
+        shift = torch.nn.Parameter(torch.ones(1, device=device))
+        pred_latent = torch.nn.Parameter(pred_latent)
 
         sparse_range = (sparse_depth[sparse_mask].max() - sparse_depth[sparse_mask].min()).item()
         sparse_lower = (sparse_depth[sparse_mask].min()).item()
@@ -201,7 +201,7 @@ def main():
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
 
     if not torch.cuda.is_available():
-        logging.warning(f"CUDA not found: Using a lightweight VAE")
+        logging.warning("CUDA not found: Using a lightweight VAE")
         del pipe.vae
         pipe.vae = diffusers.AutoencoderTiny.from_pretrained("madebyollin/taesd").to(device)
 

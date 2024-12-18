@@ -30,6 +30,11 @@ cd Marigold-DC
 python -m venv venv/marigold_dc
 ```
 
+⚡ Activate the environment:
+```bash
+source venv/marigold_dc/bin/activate
+```
+
 💻 Install the dependencies:
 ```bash
 pip install -r requirements.txt
@@ -42,19 +47,12 @@ and saves the output as a dense numpy array, along with the visualization.
 Optimal default settings are applied.
 By default, it processes the [teaser image](data/image.png) and uses [100-point guidance](data/sparse_100.npy). 
 
-⚡ Activate the environment:
-```bash
-source venv/marigold_dc/bin/activate
-```
-
-🏃🏻‍♂️‍➡️ And simply run as follows:
-
+🏃🏻‍♂️‍➡️ Simply run as follows:
 ```bash
 python -m marigold_dc
 ```
 
 🧩 Customize image and sparse depth inputs as follows:
-
 ```bash
 python -m marigold_dc \
     --in-image <PATH_RGB_IMAGE> \
