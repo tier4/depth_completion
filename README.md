@@ -1,7 +1,7 @@
 # ⇆ Marigold-DC: Zero-Shot Monocular Depth Completion with Guided Diffusion
 
-[![Website](https://img.shields.io/badge/%F0%9F%8C%BC%20Project%20-Website-blue)](https://marigolddepthcompletion.github.io)
-[![arXiv](https://img.shields.io/badge/arXiv-PDF-b31b1b)](http://arxiv.org/abs/2412.xxxxx)
+[![Website](https://img.shields.io/badge/%F0%9F%A4%8D%20Project%20-Website-blue)](https://marigolddepthcompletion.github.io)
+[![arXiv](https://img.shields.io/badge/arXiv-PDF-b31b1b)](http://arxiv.org/abs/2412.13389)
 [![Hugging Face Space](https://img.shields.io/badge/🤗%20Hugging%20Face%20-Space-yellow)](https://huggingface.co/spaces/prs-eth/marigold-dc)
 [![License](https://img.shields.io/badge/License-Apache--2.0-929292)](https://www.apache.org/licenses/LICENSE-2.0)
 
@@ -107,7 +107,7 @@ from (dense) image pixels, guided by sparse depth; rather than as inpainting (sp
     title={Marigold-DC: Zero-Shot Monocular Depth Completion with Guided Diffusion}, 
     author={Massimiliano Viola and Kevin Qu and Nando Metzger and Bingxin Ke and Alexander Becker and Konrad Schindler and Anton Obukhov},
     year={2024},
-    eprint={2412.xxxxx},
+    eprint={2412.13389},
     archivePrefix={arXiv},
     primaryClass={cs.CV},
 }
