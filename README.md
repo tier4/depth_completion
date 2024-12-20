@@ -99,8 +99,8 @@ from (dense) image pixels, guided by sparse depth; rather than as inpainting (sp
 
 ## 📢 News
 
-2024-12-19: ArXiv paper and demo release.
-2024-12-18: Code release (this repository).
+ - 2024-12-19: ArXiv paper and demo release.
+ - 2024-12-18: Code release (this repository).
 
 ## 🎓 Citation
 ```bibtex
