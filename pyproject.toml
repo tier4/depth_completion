@@ -1,9 +1,9 @@
 [tool.black]
 target-version = ["py311"]
-line-length = 100
+line-length = 88
 
 [tool.ruff]
-line-length = 100
+line-length = 88
 target-version = "py311"
 indent-width = 4
 
@@ -21,8 +21,8 @@ select = [
     "F",
     # flake8-bugbear
     "B",
-    # flake8-annotations
-    "A",
+    # flake8-simplify
+    "SIM",
     # isort
     "I",
 ]

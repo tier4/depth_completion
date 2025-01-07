@@ -54,17 +54,12 @@ def main(
         sys.exit(1)
 
     # Get paths of input images
-    if input_img.is_dir():
-        # Search for all images in the directory
-        input_img_paths = get_img_paths(input_img)
-    else:
-        input_img_paths = [input_img]
+    input_img_paths = get_img_paths(input_img) if input_img.is_dir() else [input_img]
 
     # Get paths of input depth maps
-    if input_depth.is_dir():
-        input_depth_paths = get_img_paths(input_depth)
-    else:
-        input_depth_paths = [input_depth]
+    input_depth_paths = (
+        get_img_paths(input_depth) if input_depth.is_dir() else [input_depth]
+    )
 
     # Create mapping of image stem to path
     img_stem_to_path = {}
@@ -109,24 +104,32 @@ def main(
         logger.info(f"Found {len(input_pairs):,} input image-depth pairs")
 
     # Initialize pipeline
-    pipe = MarigoldDepthCompletionPipeline.from_pretrained(DEPTH_CKPT, prediction_type="depth").to(
-        torch.device("cuda")
+    pipe = MarigoldDepthCompletionPipeline.from_pretrained(
+        DEPTH_CKPT, prediction_type="depth"
+    ).to(torch.device("cuda"))
+    pipe.scheduler = DDIMScheduler.from_config(
+        pipe.scheduler.config, timestep_spacing="trailing"
     )
-    pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
 
     # Inference
     logger.info("Starting inference")
     for i, (img_path, depth_path) in enumerate(input_pairs):
-        logger.info(f"[{i+1:,} / {len(input_pairs):,}] Processing {img_path} and {depth_path}")
+        logger.info(
+            f"[{i+1:,} / {len(input_pairs):,}] Processing {img_path} and {depth_path}"
+        )
         img = Image.open(img_path).convert("RGB")
-        depth = to_depth(Image.open(depth_path).convert("RGB"), max_distance=max_distance)
+        depth = to_depth(
+            Image.open(depth_path).convert("RGB"), max_distance=max_distance
+        )
         out = pipe(
             image=img,
             sparse_depth=depth,
             num_inference_steps=steps,
             processing_resolution=resolution,
         )
-        vis = pipe.image_processor.visualize_depth(out, val_min=0, val_max=max_distance)[0]
+        vis = pipe.image_processor.visualize_depth(
+            out, val_min=0, val_max=max_distance
+        )[0]
         if output_depth.is_dir():
             save_path = output_depth / f"{img_path.stem}_vis.jpg"
         else:

@@ -5,13 +5,16 @@ import numpy as np
 from PIL import Image
 
 
-def to_depth(img: Image.Image, dtype: str = "float32", max_distance: float = 120.0) -> np.ndarray:
+def to_depth(
+    img: Image.Image, dtype: str = "float32", max_distance: float = 120.0
+) -> np.ndarray:
     """Convert a PIL Image to a depth map.
 
     Args:
         img (Image.Image): Input PIL image
         dtype (str, optional): Data type for output array. Defaults to "float32".
-        max_distance (float, optional): Maximum depth value in meters. Defaults to 120.0.
+        max_distance (float, optional): Maximum depth value in meters.
+                                        Defaults to 120.0.
 
     Returns:
         np.ndarray: Depth map as numpy array with values ranging from 0 to max_distance,
