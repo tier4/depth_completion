@@ -1,6 +1,28 @@
 from pathlib import Path
 
 import imagesize
+import numpy as np
+from PIL import Image
+
+
+def to_depth(img: Image.Image, dtype: str = "float32", max_distance: float = 120.0) -> np.ndarray:
+    """Convert a PIL Image to a depth map.
+
+    Args:
+        img (Image.Image): Input PIL image
+        dtype (str, optional): Data type for output array. Defaults to "float32".
+        max_distance (float, optional): Maximum depth value in meters. Defaults to 120.0.
+
+    Returns:
+        np.ndarray: Depth map as numpy array with values ranging from 0 to max_distance,
+                   where 0 represents the closest depth and max_distance the farthest.
+
+    Raises:
+        ValueError: If input image is not in RGB format
+    """
+    if img.mode != "RGB":
+        raise ValueError(f"Input image must be RGB format, got {img.mode}")
+    return max_distance * np.array(img, dtype=dtype)[..., 0] / 255.0
 
 
 def is_img_file(path: Path) -> bool:
