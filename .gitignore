@@ -1,5 +1,13 @@
-data/dense*
-.idea
+# Files
 *.pyc
-venv
-.vscode
+*.jpg
+*.png
+*.npy
+*.npz
+*.pkl
+
+# Directories
+.vscode/
+**/__pycache__/
+**/.mypy_cache/
+**/.DS_Store/
