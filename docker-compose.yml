@@ -1,0 +1,25 @@
+services:
+  dev:
+    ipc: host
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      args:
+        USER_ID: ${UID:-9999}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: /bin/bash -c "while sleep 1000; do :; done"
+    volumes:
+      - type: bind
+        source: ~/.ssh
+        target: /home/user/.ssh
+        consistency: delegated
+      - type: bind
+        source: .
+        target: /home/user/dev
+        consistency: delegated

@@ -1,0 +1,12 @@
+{
+    "exclude": [
+        "data",
+        "**/.mypy_cache",
+        "**/.cache",
+        "**/.git",
+        "**/.hypothesis",
+        "**/__pycache__",
+        "**/site-packages",
+    ],
+    "typeCheckingMode": "off",
+}

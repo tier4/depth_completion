@@ -1,0 +1,71 @@
+{
+    "name": "${localWorkspaceFolderBasename}",
+    "dockerComposeFile": [
+        "docker-compose.yml"
+    ],
+    "service": "dev",
+    "workspaceFolder": "/home/user/dev",
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "files.exclude": {
+                    "${workspaceFolder}/data": true,
+                    "**/.cache": true,
+                    "**/.git": true,
+                    "**/.mypy_cache": true,
+                    "**/.hypothesis": true,
+                    "**/__pycache__": true,
+                    "**/site-packages": true
+                },
+                "files.watcherExclude": {
+                    "${workspaceFolder}/data": true,
+                    "**/.cache": true,
+                    "**/.git": true,
+                    "**/.mypy_cache": true,
+                    "**/.hypothesis": true,
+                    "**/__pycache__": true,
+                    "**/site-packages": true
+                },
+                "python.analysis.exclude": [
+                    "${workspaceFolder}/data",
+                    "**/.cache",
+                    "**/.git",
+                    "**/.mypy_cache",
+                    "**/.hypothesis",
+                    "**/__pycache__",
+                    "**/site-packages"
+                ],
+                // NOTE: Tips for lightweight pylice configuration
+                // https://github.com/microsoft/pylance-release/wiki/Pylance-Configuration-Tips
+                "python.analysis.diagnosticMode": "openFilesOnly",
+                "python.analysis.autoIndent": true,
+                "python.analysis.autoImportCompletions": true,
+                "editor.formatOnSave": true,
+                "editor.codeActionsOnSave": {
+                    "source.fixAll.ruff": "explicit",
+                    "source.organizeImports.ruff": "explicit"
+                },
+                "[python]": {
+                    "editor.defaultFormatter": "ms-python.black-formatter"
+                },
+                "[jsonc]": {
+                    "editor.defaultFormatter": "esbenp.prettier-vscode"
+                },
+                "[dockerfile]": {
+                    "editor.defaultFormatter": "ms-azuretools.vscode-docker"
+                },
+                "python.defaultInterpreterPath": "/home/user/.pyenv/shims/python",
+                "files.insertFinalNewline": true
+            },
+            "extensions": [
+                "ms-python.python",
+                "ms-python.mypy-type-checker",
+                "ms-python.black-formatter",
+                "charliermarsh.ruff",
+                "donjayamanne.githistory",
+                "ms-azuretools.vscode-docker",
+                "esbenp.prettier-vscode"
+            ]
+        }
+    }
+}

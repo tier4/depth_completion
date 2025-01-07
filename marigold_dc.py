@@ -16,10 +16,10 @@
 # Please find bibtex at: https://github.com/prs-eth/Marigold-DC#-citation
 # More information can be found at https://marigolddepthcompletion.github.io
 # ---------------------------------------------------------------------------------
+import argparse
 import logging
 import os
 import warnings
-import argparse
 
 import diffusers
 import numpy as np
@@ -30,16 +30,21 @@ from PIL import Image
 warnings.simplefilter(action="ignore", category=FutureWarning)
 diffusers.utils.logging.disable_progress_bar()
 
+
 class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
     """
     Pipeline for Marigold Depth Completion.
     Extends the MarigoldDepthPipeline to include depth completion functionality.
     """
+
     def __call__(
-        self, image: Image.Image, sparse_depth: np.ndarray,
-        num_inference_steps: int = 50, processing_resolution: int = 768, seed: int = 2024
+        self,
+        image: Image.Image,
+        sparse_depth: np.ndarray,
+        num_inference_steps: int = 50,
+        processing_resolution: int = 768,
+        seed: int = 2024,
     ) -> np.ndarray:
-        
         """
         Args:
             image (PIL.Image.Image): Input image of shape [H, W] with 3 channels.
@@ -60,13 +65,20 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         if num_inference_steps is None:
             raise ValueError("Invalid num_inference_steps")
         if type(sparse_depth) is not np.ndarray or sparse_depth.ndim != 2:
-            raise ValueError("Sparse depth should be a 2D numpy ndarray with zeros at missing positions")
+            raise ValueError(
+                "Sparse depth should be a 2D numpy ndarray with zeros at missing positions"
+            )
 
         # Prepare empty text conditioning
         with torch.no_grad():
             if self.empty_text_embedding is None:
-                text_inputs = self.tokenizer("", padding="do_not_pad", 
-                    max_length=self.tokenizer.model_max_length, truncation=True, return_tensors="pt")
+                text_inputs = self.tokenizer(
+                    "",
+                    padding="do_not_pad",
+                    max_length=self.tokenizer.model_max_length,
+                    truncation=True,
+                    return_tensors="pt",
+                )
                 text_input_ids = text_inputs.input_ids.to(device)
                 self.empty_text_embedding = self.text_encoder(text_input_ids)[0]  # [1,2,1024]
 
@@ -80,10 +92,12 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             raise ValueError(
                 f"Sparse depth dimensions ({sparse_depth.shape}) must match that of the image ({image.shape[-2:]})"
             )
-        
+
         # Encode input image into latent space
         with torch.no_grad():
-            image_latent, pred_latent = self.prepare_latents(image, None, generator, 1, 1)  # [N*E,4,h,w], [N*E,4,h,w]
+            image_latent, pred_latent = self.prepare_latents(
+                image, None, generator, 1, 1
+            )  # [N*E,4,h,w], [N*E,4,h,w]
         del image
 
         # Preprocess sparse depth
@@ -92,21 +106,28 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         logging.info(f"Using {sparse_mask.int().sum().item()} guidance points")
 
         # Set up optimization targets and compute the range and lower bound of the sparse depth
-        scale, shift = torch.nn.Parameter(torch.ones(1, device=device)), torch.nn.Parameter(torch.ones(1, device=device))
+        scale, shift = torch.nn.Parameter(torch.ones(1, device=device)), torch.nn.Parameter(
+            torch.ones(1, device=device)
+        )
         pred_latent = torch.nn.Parameter(pred_latent)
-        sparse_range = (sparse_depth[sparse_mask].max() - sparse_depth[sparse_mask].min()).item() # (cmax − cmin)
-        sparse_lower = (sparse_depth[sparse_mask].min()).item() # cmin
-        
+        sparse_range = (
+            sparse_depth[sparse_mask].max() - sparse_depth[sparse_mask].min()
+        ).item()  # (cmax − cmin)
+        sparse_lower = (sparse_depth[sparse_mask].min()).item()  # cmin
+
         # Set up optimizer
-        optimizer = torch.optim.Adam([ {"params": [scale, shift], "lr": 0.005},
-                                       {"params": [pred_latent] , "lr": 0.05 }])
+        optimizer = torch.optim.Adam(
+            [{"params": [scale, shift], "lr": 0.005}, {"params": [pred_latent], "lr": 0.05}]
+        )
 
         def affine_to_metric(depth: torch.Tensor) -> torch.Tensor:
-            # Convert affine invariant depth predictions to metric depth predictions using the parametrized scale and shift. See Equation 2 of the paper.
+            # Convert affine invariant depth predictions to metric depth predictions
+            # using the parametrized scale and shift. See Equation 2 of the paper.
             return (scale**2) * sparse_range * depth + (shift**2) * sparse_lower
 
         def latent_to_metric(latent: torch.Tensor) -> torch.Tensor:
-            # Decode latent to affine invariant depth predictions and subsequently to metric depth predictions.
+            # Decode latent to affine invariant depth
+            # predictions and subsequently to metric depth predictions.
             affine_invariant_prediction = self.decode_prediction(latent)  # [E,1,PPH,PPW]
             prediction = affine_to_metric(affine_invariant_prediction)
             prediction = self.image_processor.unpad_image(prediction, padding)  # [E,1,PH,PW]
@@ -125,7 +146,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         # Denoising loop
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         for _, t in enumerate(
-            self.progress_bar(self.scheduler.timesteps, desc=f"Marigold-DC steps ({str(device)})...")
+            self.progress_bar(
+                self.scheduler.timesteps, desc=f"Marigold-DC steps ({str(device)})..."
+            )
         ):
             optimizer.zero_grad()
 
@@ -133,7 +156,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             batch_latent = torch.cat([image_latent, pred_latent], dim=1)  # [1,8,h,w]
             noise = self.unet(
                 batch_latent, t, encoder_hidden_states=self.empty_text_embedding, return_dict=False
-            )[0]  # [1,4,h,w]
+            )[
+                0
+            ]  # [1,4,h,w]
 
             # Compute pred_epsilon to later rescale the depth latent gradient
             with torch.no_grad():
@@ -163,7 +188,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
             # Execute update of the latent with regular denoising diffusion step
             with torch.no_grad():
-                pred_latent.data = self.scheduler.step(noise, t, pred_latent, generator=generator).prev_sample
+                pred_latent.data = self.scheduler.step(
+                    noise, t, pred_latent, generator=generator
+                ).prev_sample
 
             del pred_original_sample, current_metric_estimate, step_output, pred_epsilon, noise
             torch.cuda.empty_cache()
@@ -179,17 +206,23 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         self.maybe_free_model_hooks()
 
         return prediction.squeeze()
-    
 
-def main():
+
+def main() -> None:
     parser = argparse.ArgumentParser(description="Marigold-DC Pipeline")
 
     DEPTH_CHECKPOINT = "prs-eth/marigold-depth-v1-0"
     parser.add_argument("--in-image", type=str, default="data/image.png", help="Input image")
-    parser.add_argument("--in-depth", type=str, default="data/sparse_100.npy", help="Input sparse depth")
-    parser.add_argument("--out-depth", type=str, default="data/dense_100.npy", help="Output dense depth")
+    parser.add_argument(
+        "--in-depth", type=str, default="data/sparse_100.npy", help="Input sparse depth"
+    )
+    parser.add_argument(
+        "--out-depth", type=str, default="data/dense_100.npy", help="Output dense depth"
+    )
     parser.add_argument("--num_inference_steps", type=int, default=50, help="Denoising steps")
-    parser.add_argument("--processing_resolution", type=int, default=768, help="Denoising resolution")
+    parser.add_argument(
+        "--processing_resolution", type=int, default=768, help="Denoising resolution"
+    )
     parser.add_argument("--checkpoint", type=str, default=DEPTH_CHECKPOINT, help="Depth checkpoint")
     args = parser.parse_args()
 
@@ -205,13 +238,20 @@ def main():
         processing_resolution_non_cuda = 512
         num_inference_steps_non_cuda = 10
         if processing_resolution > processing_resolution_non_cuda:
-            logging.warning(f"CUDA not found: Reducing processing_resolution to {processing_resolution_non_cuda}")
+            logging.warning(
+                f"CUDA not found: Reducing processing_resolution to "
+                f"{processing_resolution_non_cuda}"
+            )
             processing_resolution = processing_resolution_non_cuda
         if num_inference_steps > num_inference_steps_non_cuda:
-            logging.warning(f"CUDA not found: Reducing num_inference_steps to {num_inference_steps_non_cuda}")
+            logging.warning(
+                f"CUDA not found: Reducing num_inference_steps to {num_inference_steps_non_cuda}"
+            )
             num_inference_steps = num_inference_steps_non_cuda
 
-    pipe = MarigoldDepthCompletionPipeline.from_pretrained(args.checkpoint, prediction_type="depth").to(device)
+    pipe = MarigoldDepthCompletionPipeline.from_pretrained(
+        args.checkpoint, prediction_type="depth"
+    ).to(device)
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
 
     if not torch.cuda.is_available():
