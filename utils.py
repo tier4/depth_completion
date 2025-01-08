@@ -49,7 +49,7 @@ def make_grid(
     if imgs.size == 0 or len(imgs.shape) != 4:
         raise ValueError("Images must be non-empty 4D array (N,H,W,C)")
 
-    n, h, w = imgs.shape[:3]
+    n = imgs.shape[0]
 
     # Calculate grid dimensions
     if rows is None and cols is None:
@@ -59,21 +59,31 @@ def make_grid(
     if cols is None:
         cols = int(np.ceil(n / rows))
 
+    h, w = imgs.shape[1:3]
+    grid_h, grid_w = h * rows, w * cols
+
+    # Calculate target size for the grid
+    if resize is not None:
+        th, tw = resize
+        if th != -1 or tw != -1:
+            target_h = th if th != -1 else int(tw * grid_h / grid_w)
+            target_w = tw if tw != -1 else int(th * grid_w / grid_h)
+            # Calculate individual image size based on grid target size
+            h = target_h // rows
+            w = target_w // cols
+            # Resize all images to the new size
+            imgs = np.array(
+                [
+                    cv2.resize(img, (w, h), interpolation=cv2.INTER_LINEAR)
+                    for img in imgs
+                ]
+            )
+
     # Create and fill grid
     grid = np.zeros((h * rows, w * cols) + imgs.shape[3:], dtype=imgs.dtype)
     for idx in range(n):
         i, j = idx // cols, idx % cols
         grid[i * h : (i + 1) * h, j * w : (j + 1) * w] = imgs[idx]
-
-    # Handle resizing
-    if resize is not None:
-        th, tw = resize
-        if th != -1 or tw != -1:
-            if th == -1:
-                th = int(tw * grid.shape[0] / grid.shape[1])
-            elif tw == -1:
-                tw = int(th * grid.shape[1] / grid.shape[0])
-            grid = cv2.resize(grid, (tw, th), interpolation=cv2.INTER_LINEAR)
 
     return grid
 
