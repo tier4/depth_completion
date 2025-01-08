@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 import click
+import cv2
 import numpy as np
 import torch
 from diffusers import DDIMScheduler
@@ -12,6 +13,7 @@ from marigold_dc import MarigoldDepthCompletionPipeline
 from utils import CommaSeparated, get_img_paths, is_empty_img, make_grid, to_depth
 
 DEPTH_CKPT = "prs-eth/marigold-depth-v1-0"
+EPSILON = 1e-6
 
 
 @click.command()
@@ -130,29 +132,44 @@ def main(
         if is_empty_img(img):
             logger.warning(f"Empty input image found: {img_path} (skipping)")
             continue
-        depth_img = Image.open(depth_path).convert("RGB")
-        depth_map = to_depth(depth_img, max_distance=max_distance)
+        depth = to_depth(
+            Image.open(depth_path).convert("RGB"), max_distance=max_distance
+        )
         preds = pipe(
             image=img,
-            sparse_depth=depth_map,
+            sparse_depth=depth,
             num_inference_steps=steps,
             processing_resolution=resolution,
         )
         out_img = pipe.image_processor.visualize_depth(
             preds, val_min=0, val_max=max_distance
         )[0]
+        depth_img_cnv = pipe.image_processor.visualize_depth(
+            depth, val_min=0, val_max=max_distance
+        )[0]
+        depth_map_vis = np.array(depth_img_cnv)
+        depth_map_vis[depth < EPSILON] = 0
+        depth_img_cnv = Image.fromarray(depth_map_vis)
+        grid_img = Image.fromarray(
+            make_grid(
+                np.stack(
+                    [np.asarray(im) for im in [img, depth_img_cnv, out_img]], axis=0
+                ),
+                rows=1,
+                cols=3,
+                resize=(
+                    (output_size[0], output_size[1])
+                    if output_size is not None
+                    else None
+                ),
+                # NOTE: Resize depth map with nearest neighbor interpolation
+                interpolation=[cv2.INTER_LINEAR, cv2.INTER_NEAREST, cv2.INTER_LINEAR],
+            )
+        )
         if output_depth.is_dir():
             save_path = output_depth / f"{img_path.stem}_vis.jpg"
         else:
             save_path = output_depth
-        grid_img = Image.fromarray(
-            make_grid(
-                np.stack([np.asarray(im) for im in [img, depth_img, out_img]], axis=0),
-                rows=1,
-                cols=3,
-                resize=output_size if output_size is not None else None,
-            )
-        )
         grid_img.save(save_path)
         logger.info(f"Saved visualization of output depth map at {save_path}")
 

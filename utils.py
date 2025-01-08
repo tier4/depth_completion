@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import click
 import cv2
@@ -100,33 +100,60 @@ def make_grid(
     rows: int | None = None,
     cols: int | None = None,
     resize: tuple[int, int] | None = None,
+    interpolation: int | list[int] = cv2.INTER_LINEAR,
 ) -> np.ndarray:
-    """Create a grid of images from a numpy array of shape (N,H,W,C).
+    """Create a grid of images from a numpy array.
+
+    Takes a batch of images and arranges them in a grid pattern. Can optionally resize
+    the final grid output.
 
     Args:
         imgs (np.ndarray): Array of images with shape (N,H,W,C) where:
-            N is number of images, H is height, W is width, C is channels
-        rows (int, optional): Number of rows in grid.
-            If None, will be calculated from cols.
-            If both None, will try to create a square grid.
-        cols (int, optional): Number of columns in grid.
-            If None, will be calculated from rows.
-            If both None, will try to create a square grid.
-        resize (tuple[int, int], optional): Target size (height, width) of output.
-            If None, no resizing is performed.
-            If -1 is specified for either dimension, aspect ratio is preserved.
-            If both dimensions are -1, no resizing is performed.
+            N is number of images
+            H is height of each image
+            W is width of each image
+            C is number of channels per image
+        rows (int | None, optional): Number of rows in output grid. If None:
+            - Will be calculated from cols if cols is specified
+            - Will create a square-ish grid if cols is also None
+        cols (int | None, optional): Number of columns in output grid. If None:
+            - Will be calculated from rows if rows is specified
+            - Will create a square-ish grid if rows is also None
+        resize (tuple[int, int] | None, optional): Target (height, width) to resize final grid to.
+            - If None: No resizing is performed
+            - If either dimension is -1: That dimension is calculated to preserve aspect ratio
+            - If both dimensions are -1: No resizing is performed
+        interpolation (cv2.InterpolationFlags | list[cv2.InterpolationFlags], optional):
+            OpenCV interpolation method(s) for resizing. Can be either:
+            - A single interpolation flag to use for all images
+            - A list of flags matching the number of input images
+            Defaults to cv2.INTER_LINEAR.
 
     Returns:
-        np.ndarray: Grid image as numpy array
+        np.ndarray: Grid image with shape (grid_height, grid_width, C) containing all input
+            images arranged in a grid pattern.
 
     Raises:
-        ValueError: If images array is empty or not 4-dimensional
+        ValueError: If imgs is empty or not a 4D array
+        ValueError: If a list of interpolation methods is provided but length doesn't match
+            number of input images
+
+    Example:
+        >>> # Create 2x2 grid from 4 images
+        >>> grid = make_grid(images, rows=2, cols=2)
+        >>> # Create auto-sized grid, resized to 512x512
+        >>> grid = make_grid(images, resize=(512,512))
+        >>> # Create grid with different interpolation per image
+        >>> grid = make_grid(images, interpolation=[cv2.INTER_LINEAR, cv2.INTER_NEAREST])
     """
     if imgs.size == 0 or len(imgs.shape) != 4:
         raise ValueError("Images must be non-empty 4D array (N,H,W,C)")
 
     n = imgs.shape[0]
+    if isinstance(interpolation, Sequence) and len(interpolation) != n:
+        raise ValueError(
+            f"Interpolation list length ({len(interpolation)}) must match number of images ({n})"
+        )
 
     # Calculate grid dimensions
     if rows is None and cols is None:
@@ -143,6 +170,10 @@ def make_grid(
     if resize is not None:
         th, tw = resize
         if th != -1 or tw != -1:
+            if isinstance(interpolation, Sequence):
+                methods = interpolation
+            else:
+                methods = [interpolation] * n
             target_h = th if th != -1 else int(tw * grid_h / grid_w)
             target_w = tw if tw != -1 else int(th * grid_w / grid_h)
             # Calculate individual image size based on grid target size
@@ -151,8 +182,8 @@ def make_grid(
             # Resize all images to the new size
             imgs = np.array(
                 [
-                    cv2.resize(img, (w, h), interpolation=cv2.INTER_LINEAR)
-                    for img in imgs
+                    cv2.resize(img, (w, h), interpolation=method)
+                    for img, method in zip(imgs, methods, strict=False)
                 ]
             )
 
