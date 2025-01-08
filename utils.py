@@ -1,9 +1,86 @@
 from pathlib import Path
+from typing import Any
 
+import click
 import cv2
 import imagesize
 import numpy as np
 from PIL import Image
+
+
+class CommaSeparated(click.ParamType):
+    """A Click parameter type that parses comma-separated values into a list.
+
+    This class extends Click's ParamType to handle comma-separated input strings,
+    converting them into a list of values of a specified type. It can optionally
+    enforce a specific number of values.
+
+    Args:
+        type_ (type): The type to convert each comma-separated value to. Defaults to str.
+        n (int | None): If specified, enforces exactly this many comma-separated values.
+            Must be None or a positive integer. Defaults to None.
+
+    Raises:
+        ValueError: If n is not None and not a positive integer.
+
+    Examples:
+        Basic usage with strings:
+            @click.command()
+            @click.option("--names", type=CommaSeparated())
+            def cmd(names):
+                # --names "alice,bob,charlie" -> ["alice", "bob", "charlie"]
+                pass
+
+        With integers and fixed length:
+            @click.command()
+            @click.option("--coords", type=CommaSeparated(int, n=2))
+            def cmd(coords):
+                # --coords "10,20" -> [10, 20]
+                # --coords "1,2,3" -> Error: not exactly 2 values
+                pass
+
+        With floats:
+            @click.command()
+            @click.option("--weights", type=CommaSeparated(float))
+            def cmd(weights):
+                # --weights "0.1,0.2,0.7" -> [0.1, 0.2, 0.7]
+                pass
+    """
+
+    name = "comma_separated"
+
+    def __init__(self, type_: type = str, n: int | None = None) -> None:
+        if n is not None and n <= 0:
+            raise ValueError("n must be None or a positive integer")
+        self.type = type_
+        self.n = n
+
+    def convert(
+        self,
+        value: str | None,
+        param: click.Parameter | None,
+        ctx: click.Context | None,
+    ) -> list[Any] | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if value == "":
+            return []
+        items = value.split(",")
+        if self.n is not None and len(items) != self.n:
+            self.fail(
+                f"{value} does not contain exactly {self.n} comma separated values",
+                param,
+                ctx,
+            )
+        try:
+            return [self.type(item) for item in items]
+        except ValueError:
+            self.fail(
+                f"{value} is not a valid comma separated list of {self.type.__name__}",
+                param,
+                ctx,
+            )
 
 
 def is_empty_img(img: Image.Image) -> bool:

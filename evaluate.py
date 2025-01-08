@@ -2,13 +2,14 @@ import sys
 from pathlib import Path
 
 import click
+import numpy as np
 import torch
 from diffusers import DDIMScheduler
 from loguru import logger
 from PIL import Image
 
 from marigold_dc import MarigoldDepthCompletionPipeline
-from utils import get_img_paths, is_empty_img, to_depth
+from utils import CommaSeparated, get_img_paths, is_empty_img, make_grid, to_depth
 
 DEPTH_CKPT = "prs-eth/marigold-depth-v1-0"
 
@@ -40,6 +41,13 @@ DEPTH_CKPT = "prs-eth/marigold-depth-v1-0"
     help="Max absolute distance [m] of input sparse depth maps.",
     show_default=True,
 )
+@click.option(
+    "-os",
+    "--output-size",
+    type=CommaSeparated(int, n=2),
+    default=None,
+    show_default=True,
+)
 def main(
     input_img: Path,
     input_depth: Path,
@@ -47,6 +55,7 @@ def main(
     steps: int,
     resolution: int,
     max_distance: float,
+    output_size: list[int] | None,
 ) -> None:
     # Check if CUDA is available
     if not torch.cuda.is_available():
@@ -121,23 +130,30 @@ def main(
         if is_empty_img(img):
             logger.warning(f"Empty input image found: {img_path} (skipping)")
             continue
-        depth = to_depth(
-            Image.open(depth_path).convert("RGB"), max_distance=max_distance
-        )
-        out = pipe(
+        depth_img = Image.open(depth_path).convert("RGB")
+        depth_map = to_depth(depth_img, max_distance=max_distance)
+        preds = pipe(
             image=img,
-            sparse_depth=depth,
+            sparse_depth=depth_map,
             num_inference_steps=steps,
             processing_resolution=resolution,
         )
-        vis = pipe.image_processor.visualize_depth(
-            out, val_min=0, val_max=max_distance
+        out_img = pipe.image_processor.visualize_depth(
+            preds, val_min=0, val_max=max_distance
         )[0]
         if output_depth.is_dir():
             save_path = output_depth / f"{img_path.stem}_vis.jpg"
         else:
             save_path = output_depth
-        vis.save(save_path)
+        grid_img = Image.fromarray(
+            make_grid(
+                np.stack([np.asarray(im) for im in [img, depth_img, out_img]], axis=0),
+                rows=1,
+                cols=3,
+                resize=output_size if output_size is not None else None,
+            )
+        )
+        grid_img.save(save_path)
         logger.info(f"Saved visualization of output depth map at {save_path}")
 
 
