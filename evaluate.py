@@ -8,7 +8,7 @@ from loguru import logger
 from PIL import Image
 
 from marigold_dc import MarigoldDepthCompletionPipeline
-from utils import get_img_paths, to_depth
+from utils import get_img_paths, is_empty_img, to_depth
 
 DEPTH_CKPT = "prs-eth/marigold-depth-v1-0"
 
@@ -118,6 +118,9 @@ def main(
             f"[{i+1:,} / {len(input_pairs):,}] Processing {img_path} and {depth_path}"
         )
         img = Image.open(img_path).convert("RGB")
+        if is_empty_img(img):
+            logger.warning(f"Empty input image found: {img_path} (skipping)")
+            continue
         depth = to_depth(
             Image.open(depth_path).convert("RGB"), max_distance=max_distance
         )
