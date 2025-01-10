@@ -41,7 +41,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         self,
         image: Image.Image,
         sparse_depth: np.ndarray,
-        depth_range: tuple[float, float] | None = None,
         num_inference_steps: int = 50,
         processing_resolution: int = 768,
         seed: int = 2024,
@@ -68,12 +67,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             ValueError: If sparse_depth is not a 2D numpy array.
             ValueError: If sparse_depth dimensions don't match image dimensions.
         """
-        # Check if depth_range is valid
-        if depth_range is not None:
-            if not isinstance(depth_range, tuple) or len(depth_range) != 2:
-                raise ValueError("depth_range must be a tuple of two floats")
-            if depth_range[0] >= depth_range[1]:
-                raise ValueError("depth_range[0] must be less than depth_range[1]")
 
         # Resolving variables
         device = self._execution_device
@@ -133,14 +126,10 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             torch.ones(1, device=device)
         ), torch.nn.Parameter(torch.ones(1, device=device))
         pred_latent = torch.nn.Parameter(pred_latent)
-        if depth_range is None:
-            depth_min = sparse_depth[sparse_mask].min()
-            depth_max = sparse_depth[sparse_mask].max()
-            sparse_range = depth_max - depth_min
-            sparse_lower = depth_min
-        else:
-            sparse_range = depth_range[1] - depth_range[0]
-            sparse_lower = depth_range[0]
+        depth_min = sparse_depth[sparse_mask].min()
+        depth_max = sparse_depth[sparse_mask].max()
+        sparse_range = depth_max - depth_min
+        sparse_lower = depth_min
 
         # Set up optimizer
         optimizer = torch.optim.Adam(
