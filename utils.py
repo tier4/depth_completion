@@ -8,6 +8,39 @@ import numpy as np
 from PIL import Image
 
 
+def mae(preds: np.ndarray, depth: np.ndarray, mask: np.ndarray | None = None) -> float:
+    """Calculate the mean absolute error between two depth maps.
+
+    Args:
+        preds (np.ndarray): Predicted depth map
+        depth (np.ndarray): Ground truth depth map
+        mask (np.ndarray | None, optional): Mask to apply to the depth maps.
+    Returns:
+        float: Mean absolute error between the two depth maps
+    """
+    if mask is not None:
+        preds = preds[mask]
+        depth = depth[mask]
+    return float(np.mean(np.abs(preds - depth)))
+
+
+def rmse(preds: np.ndarray, depth: np.ndarray, mask: np.ndarray | None = None) -> float:
+    """Calculate the root mean squared error between two depth maps.
+
+    Args:
+        preds (np.ndarray): Predicted depth map
+        depth (np.ndarray): Ground truth depth map
+        mask (np.ndarray | None, optional): Mask to apply to the depth maps.
+
+    Returns:
+        float: Root mean squared error between the two depth maps
+    """
+    if mask is not None:
+        preds = preds[mask]
+        depth = depth[mask]
+    return float(np.sqrt(np.mean((preds - depth) ** 2)))
+
+
 class CommaSeparated(click.ParamType):
     """A Click parameter type that parses comma-separated values into a list.
 
