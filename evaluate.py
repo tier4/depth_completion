@@ -149,6 +149,13 @@ def main(
         save_dir = (out_dir / img_path.relative_to(img_dir)).parent
         if not save_dir.exists():
             save_dir.mkdir(parents=True)
+
+        # Save output depth array
+        save_path = save_dir / f"{img_path.stem}.npy"
+        np.save(save_path, preds)
+        logger.info(f"Saved depth array at {save_path}")
+
+        # Save visualization output
         save_path = save_dir / f"{img_path.stem}_vis.jpg"
         grid_img.save(save_path)
         logger.info(f"Saved visualization of output depth map at {save_path}")
