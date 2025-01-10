@@ -5,6 +5,7 @@
 *.npy
 *.npz
 *.pkl
+*.json
 
 # Directories
 .vscode/
