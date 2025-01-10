@@ -41,6 +41,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         self,
         image: Image.Image,
         sparse_depth: np.ndarray,
+        depth_range: tuple[float, float] | None = None,
         num_inference_steps: int = 50,
         processing_resolution: int = 768,
         seed: int = 2024,
@@ -49,14 +50,31 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         Args:
             image (PIL.Image.Image): Input image of shape [H, W] with 3 channels.
             sparse_depth (np.ndarray): Sparse depth guidance of shape [H, W].
-            num_inference_steps (int, optional): Number of denoising steps. Defaults to 50.
-            processing_resolution (int, optional): Resolution for processing. Defaults to 768.
+            depth_range (tuple[float, float] | None, optional): Min and max depth values
+                to constrain output. If None, range is determined from sparse_depth.
+                Defaults to None.
+            num_inference_steps (int, optional): Number of denoising steps.
+                Defaults to 50.
+            processing_resolution (int, optional): Resolution for processing.
+                Defaults to 768.
             seed (int, optional): Random seed. Defaults to 2024.
 
         Returns:
             np.ndarray: Dense depth prediction of shape [H, W].
 
+        Raises:
+            ValueError: If depth_range is not a tuple of two floats with min < max.
+            ValueError: If num_inference_steps is None.
+            ValueError: If sparse_depth is not a 2D numpy array.
+            ValueError: If sparse_depth dimensions don't match image dimensions.
         """
+        # Check if depth_range is valid
+        if depth_range is not None:
+            if not isinstance(depth_range, tuple) or len(depth_range) != 2:
+                raise ValueError("depth_range must be a tuple of two floats")
+            if depth_range[0] >= depth_range[1]:
+                raise ValueError("depth_range[0] must be less than depth_range[1]")
+
         # Resolving variables
         device = self._execution_device
         generator = torch.Generator(device=device).manual_seed(seed)
@@ -80,11 +98,16 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     return_tensors="pt",
                 )
                 text_input_ids = text_inputs.input_ids.to(device)
-                self.empty_text_embedding = self.text_encoder(text_input_ids)[0]  # [1,2,1024]
+                self.empty_text_embedding = self.text_encoder(text_input_ids)[
+                    0
+                ]  # [1,2,1024]
 
         # Preprocess input images
         image, padding, original_resolution = self.image_processor.preprocess(
-            image, processing_resolution=processing_resolution, device=device, dtype=self.dtype
+            image,
+            processing_resolution=processing_resolution,
+            device=device,
+            dtype=self.dtype,
         )  # [N,3,PPH,PPW]
 
         # Check sparse depth dimensions
@@ -106,18 +129,25 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         logging.info(f"Using {sparse_mask.int().sum().item()} guidance points")
 
         # Set up optimization targets and compute the range and lower bound of the sparse depth
-        scale, shift = torch.nn.Parameter(torch.ones(1, device=device)), torch.nn.Parameter(
+        scale, shift = torch.nn.Parameter(
             torch.ones(1, device=device)
-        )
+        ), torch.nn.Parameter(torch.ones(1, device=device))
         pred_latent = torch.nn.Parameter(pred_latent)
-        sparse_range = (
-            sparse_depth[sparse_mask].max() - sparse_depth[sparse_mask].min()
-        ).item()  # (cmax − cmin)
-        sparse_lower = (sparse_depth[sparse_mask].min()).item()  # cmin
+        if depth_range is None:
+            depth_min = sparse_depth[sparse_mask].min()
+            depth_max = sparse_depth[sparse_mask].max()
+            sparse_range = depth_max - depth_min
+            sparse_lower = depth_min
+        else:
+            sparse_range = depth_range[1] - depth_range[0]
+            sparse_lower = depth_range[0]
 
         # Set up optimizer
         optimizer = torch.optim.Adam(
-            [{"params": [scale, shift], "lr": 0.005}, {"params": [pred_latent], "lr": 0.05}]
+            [
+                {"params": [scale, shift], "lr": 0.005},
+                {"params": [pred_latent], "lr": 0.05},
+            ]
         )
 
         def affine_to_metric(depth: torch.Tensor) -> torch.Tensor:
@@ -128,9 +158,13 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         def latent_to_metric(latent: torch.Tensor) -> torch.Tensor:
             # Decode latent to affine invariant depth
             # predictions and subsequently to metric depth predictions.
-            affine_invariant_prediction = self.decode_prediction(latent)  # [E,1,PPH,PPW]
+            affine_invariant_prediction = self.decode_prediction(
+                latent
+            )  # [E,1,PPH,PPW]
             prediction = affine_to_metric(affine_invariant_prediction)
-            prediction = self.image_processor.unpad_image(prediction, padding)  # [E,1,PH,PW]
+            prediction = self.image_processor.unpad_image(
+                prediction, padding
+            )  # [E,1,PH,PW]
             prediction = self.image_processor.resize_antialias(
                 prediction, original_resolution, "bilinear", is_aa=False
             )  # [1,1,H,W]
@@ -155,7 +189,10 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             # Forward pass through the U-Net
             batch_latent = torch.cat([image_latent, pred_latent], dim=1)  # [1,8,h,w]
             noise = self.unet(
-                batch_latent, t, encoder_hidden_states=self.empty_text_embedding, return_dict=False
+                batch_latent,
+                t,
+                encoder_hidden_states=self.empty_text_embedding,
+                return_dict=False,
             )[
                 0
             ]  # [1,4,h,w]
@@ -164,16 +201,22 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             with torch.no_grad():
                 alpha_prod_t = self.scheduler.alphas_cumprod[t]
                 beta_prod_t = 1 - alpha_prod_t
-                pred_epsilon = (alpha_prod_t**0.5) * noise + (beta_prod_t**0.5) * pred_latent
+                pred_epsilon = (alpha_prod_t**0.5) * noise + (
+                    beta_prod_t**0.5
+                ) * pred_latent
 
-            step_output = self.scheduler.step(noise, t, pred_latent, generator=generator)
+            step_output = self.scheduler.step(
+                noise, t, pred_latent, generator=generator
+            )
 
             # Preview the final output depth with Tweedie's formula (See Equation 1 of the paper)
             pred_original_sample = step_output.pred_original_sample
 
             # Decode to metric space, compute loss with guidance and backpropagate
             current_metric_estimate = latent_to_metric(pred_original_sample)
-            loss = loss_l1l2(current_metric_estimate[sparse_mask], sparse_depth[sparse_mask])
+            loss = loss_l1l2(
+                current_metric_estimate[sparse_mask], sparse_depth[sparse_mask]
+            )
             loss.backward()
 
             # Scale gradients up
@@ -192,7 +235,13 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     noise, t, pred_latent, generator=generator
                 ).prev_sample
 
-            del pred_original_sample, current_metric_estimate, step_output, pred_epsilon, noise
+            del (
+                pred_original_sample,
+                current_metric_estimate,
+                step_output,
+                pred_epsilon,
+                noise,
+            )
             torch.cuda.empty_cache()
 
         del image_latent
@@ -212,18 +261,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Marigold-DC Pipeline")
 
     DEPTH_CHECKPOINT = "prs-eth/marigold-depth-v1-0"
-    parser.add_argument("--in-image", type=str, default="data/image.png", help="Input image")
+    parser.add_argument(
+        "--in-image", type=str, default="data/image.png", help="Input image"
+    )
     parser.add_argument(
         "--in-depth", type=str, default="data/sparse_100.npy", help="Input sparse depth"
     )
     parser.add_argument(
         "--out-depth", type=str, default="data/dense_100.npy", help="Output dense depth"
     )
-    parser.add_argument("--num_inference_steps", type=int, default=50, help="Denoising steps")
+    parser.add_argument(
+        "--num_inference_steps", type=int, default=50, help="Denoising steps"
+    )
     parser.add_argument(
         "--processing_resolution", type=int, default=768, help="Denoising resolution"
     )
-    parser.add_argument("--checkpoint", type=str, default=DEPTH_CHECKPOINT, help="Depth checkpoint")
+    parser.add_argument(
+        "--checkpoint", type=str, default=DEPTH_CHECKPOINT, help="Depth checkpoint"
+    )
     args = parser.parse_args()
 
     num_inference_steps = args.num_inference_steps
@@ -252,12 +307,16 @@ def main() -> None:
     pipe = MarigoldDepthCompletionPipeline.from_pretrained(
         args.checkpoint, prediction_type="depth"
     ).to(device)
-    pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
+    pipe.scheduler = DDIMScheduler.from_config(
+        pipe.scheduler.config, timestep_spacing="trailing"
+    )
 
     if not torch.cuda.is_available():
         logging.warning("CUDA not found: Using a lightweight VAE")
         del pipe.vae
-        pipe.vae = diffusers.AutoencoderTiny.from_pretrained("madebyollin/taesd").to(device)
+        pipe.vae = diffusers.AutoencoderTiny.from_pretrained("madebyollin/taesd").to(
+            device
+        )
 
     pred = pipe(
         image=Image.open(args.in_image),
@@ -267,7 +326,9 @@ def main() -> None:
     )
 
     np.save(args.out_depth, pred)
-    vis = pipe.image_processor.visualize_depth(pred, val_min=pred.min(), val_max=pred.max())[0]
+    vis = pipe.image_processor.visualize_depth(
+        pred, val_min=pred.min(), val_max=pred.max()
+    )[0]
     vis.save(os.path.splitext(args.out_depth)[0] + "_vis.jpg")
 
 

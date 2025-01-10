@@ -138,6 +138,7 @@ def main(
         preds = pipe(
             image=img,
             sparse_depth=depth,
+            depth_range=(0, max_distance),
             num_inference_steps=steps,
             processing_resolution=resolution,
         )
