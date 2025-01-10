@@ -64,55 +64,37 @@ def main(
         logger.critical("CUDA must be available to run this script.")
         sys.exit(1)
 
+    # Check if input image and depth map are both directories or files
+    if not (
+        (input_img.is_dir() and input_depth.is_dir())
+        or (input_img.is_file() and input_depth.is_file())
+    ):
+        logger.critical("Input image and depth map must both be directories or files")
+        sys.exit(1)
+
+    is_input_dir = input_img.is_dir()
+
     # Get paths of input images
-    input_img_paths = get_img_paths(input_img) if input_img.is_dir() else [input_img]
+    input_img_paths = get_img_paths(input_img) if is_input_dir else [input_img]
 
     # Get paths of input depth maps
-    input_depth_paths = (
-        get_img_paths(input_depth) if input_depth.is_dir() else [input_depth]
-    )
-
-    # Create mapping of image stem to path
-    img_stem_to_path = {}
-    img_stems_to_skip = []
-    for path in input_img_paths:
-        if path.stem in img_stem_to_path:
-            logger.warning(f"Duplicate image filename found: {path.stem} (skipping)")
-            img_stems_to_skip.append(path.stem)
-        else:
-            img_stem_to_path[path.stem] = path
-    for key in img_stems_to_skip:
-        img_stem_to_path.pop(key)
-
-    # Create mapping of depth stem to path
-    depth_stem_to_path = {}
-    depth_stems_to_skip = []
-    for path in input_depth_paths:
-        if path.stem in depth_stem_to_path:
-            logger.warning(f"Duplicate depth filename found: {path.stem} (skipping)")
-            depth_stems_to_skip.append(path.stem)
-        else:
-            depth_stem_to_path[path.stem] = path
-    for key in depth_stems_to_skip:
-        depth_stem_to_path.pop(key)
+    if is_input_dir:
+        input_depth_paths: list[Path] = []
+        for path in input_img_paths:
+            depth_path = input_depth / path.relative_to(input_img).with_suffix(".png")
+            if not depth_path.exists():
+                logger.warning(f"No depth map found for image {path} (skipping)")
+                continue
+            input_depth_paths.append(depth_path)
+    else:
+        input_depth_paths = [input_depth]
+    assert len(input_depth_paths) == len(input_img_paths)
+    logger.info(f"Found {len(input_depth_paths):,} input image-depth pairs")
 
     # Create output directory if it doesn't exist
     if input_img.is_dir() and not output_depth.exists():
         output_depth.mkdir(parents=True)
         logger.info(f"Created output directory: {output_depth}")
-
-    # Create list of corresponding image-depth pairs
-    input_pairs: list[tuple[Path, Path]] = []
-    for stem in img_stem_to_path:
-        if stem in depth_stem_to_path:
-            input_pairs.append((img_stem_to_path[stem], depth_stem_to_path[stem]))
-        else:
-            logger.warning(f"No depth map found for image {img_stem_to_path[stem]}")
-    if len(input_pairs) == 0:
-        logger.critical("No input image-depth pairs found")
-        sys.exit(1)
-    else:
-        logger.info(f"Found {len(input_pairs):,} input image-depth pairs")
 
     # Initialize pipeline
     pipe = MarigoldDepthCompletionPipeline.from_pretrained(
@@ -124,17 +106,22 @@ def main(
 
     # Inference
     logger.info("Starting inference")
-    for i, (img_path, depth_path) in enumerate(input_pairs):
+    for i, (img_path, depth_path) in enumerate(
+        zip(input_img_paths, input_depth_paths, strict=False)
+    ):
         logger.info(
-            f"[{i+1:,} / {len(input_pairs):,}] Processing {img_path} and {depth_path}"
+            f"[{i+1:,} / {len(input_img_paths):,}] "
+            f"Processing {img_path} and {depth_path}"
         )
         img = Image.open(img_path).convert("RGB")
         if is_empty_img(img):
             logger.warning(f"Empty input image found: {img_path} (skipping)")
             continue
-        depth = to_depth(
-            Image.open(depth_path).convert("RGB"), max_distance=max_distance
-        )
+        depth_img = Image.open(depth_path).convert("RGB")
+        if is_empty_img(depth_img):
+            logger.warning(f"Empty input depth map found: {depth_path} (skipping)")
+            continue
+        depth = to_depth(depth_img, max_distance=max_distance)
         preds = pipe(
             image=img,
             sparse_depth=depth,
@@ -168,7 +155,10 @@ def main(
             )
         )
         if output_depth.is_dir():
-            save_path = output_depth / f"{img_path.stem}_vis.jpg"
+            save_dir = (output_depth / img_path.relative_to(input_img)).parent
+            if not save_dir.exists():
+                save_dir.mkdir(parents=True)
+            save_path = save_dir / f"{img_path.stem}_vis.jpg"
         else:
             save_path = output_depth
         grid_img.save(save_path)
