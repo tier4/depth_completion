@@ -18,14 +18,14 @@ EPSILON = 1e-6
 
 @click.command()
 @click.argument(
-    "input_img",
+    "img_dir",
     type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
 )
 @click.argument(
-    "input_depth",
+    "depth_dir",
     type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
 )
-@click.argument("output_depth", type=click.Path(exists=False, path_type=Path))
+@click.argument("out_dir", type=click.Path(exists=False, path_type=Path))
 @click.option(
     "-n",
     "--steps",
@@ -57,9 +57,9 @@ EPSILON = 1e-6
     show_default=True,
 )
 def main(
-    input_img: Path,
-    input_depth: Path,
-    output_depth: Path,
+    img_dir: Path,
+    depth_dir: Path,
+    out_dir: Path,
     steps: int,
     resolution: int,
     max_distance: float,
@@ -71,12 +71,12 @@ def main(
         sys.exit(1)
 
     # Get paths of input images
-    input_img_paths = get_img_paths(input_img)
+    input_img_paths = get_img_paths(img_dir)
 
     # Get paths of input depth maps
     input_depth_paths: list[Path] = []
     for path in input_img_paths:
-        depth_path = input_depth / path.relative_to(input_img).with_suffix(".png")
+        depth_path = depth_dir / path.relative_to(img_dir).with_suffix(".png")
         if not depth_path.exists():
             logger.warning(f"No depth map found for image {path} (skipping)")
             continue
@@ -85,9 +85,9 @@ def main(
     logger.info(f"Found {len(input_depth_paths):,} input image-depth pairs")
 
     # Create output directory if it doesn't exist
-    if input_img.is_dir() and not output_depth.exists():
-        output_depth.mkdir(parents=True)
-        logger.info(f"Created output directory: {output_depth}")
+    if img_dir.is_dir() and not out_dir.exists():
+        out_dir.mkdir(parents=True)
+        logger.info(f"Created output directory: {out_dir}")
 
     # Initialize pipeline
     pipe = MarigoldDepthCompletionPipeline.from_pretrained(
@@ -146,7 +146,7 @@ def main(
                 interpolation=[cv2.INTER_LINEAR, cv2.INTER_NEAREST, cv2.INTER_LINEAR],
             )
         )
-        save_dir = (output_depth / img_path.relative_to(input_img)).parent
+        save_dir = (out_dir / img_path.relative_to(img_dir)).parent
         if not save_dir.exists():
             save_dir.mkdir(parents=True)
         save_path = save_dir / f"{img_path.stem}_vis.jpg"
