@@ -17,8 +17,14 @@ EPSILON = 1e-6
 
 
 @click.command()
-@click.argument("input_img", type=click.Path(exists=True, path_type=Path))
-@click.argument("input_depth", type=click.Path(exists=True, path_type=Path))
+@click.argument(
+    "input_img",
+    type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
+)
+@click.argument(
+    "input_depth",
+    type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
+)
 @click.argument("output_depth", type=click.Path(exists=False, path_type=Path))
 @click.option(
     "-n",
@@ -64,30 +70,17 @@ def main(
         logger.critical("CUDA must be available to run this script.")
         sys.exit(1)
 
-    # Check if input image and depth map are both directories or files
-    if not (
-        (input_img.is_dir() and input_depth.is_dir())
-        or (input_img.is_file() and input_depth.is_file())
-    ):
-        logger.critical("Input image and depth map must both be directories or files")
-        sys.exit(1)
-
-    is_input_dir = input_img.is_dir()
-
     # Get paths of input images
-    input_img_paths = get_img_paths(input_img) if is_input_dir else [input_img]
+    input_img_paths = get_img_paths(input_img)
 
     # Get paths of input depth maps
-    if is_input_dir:
-        input_depth_paths: list[Path] = []
-        for path in input_img_paths:
-            depth_path = input_depth / path.relative_to(input_img).with_suffix(".png")
-            if not depth_path.exists():
-                logger.warning(f"No depth map found for image {path} (skipping)")
-                continue
-            input_depth_paths.append(depth_path)
-    else:
-        input_depth_paths = [input_depth]
+    input_depth_paths: list[Path] = []
+    for path in input_img_paths:
+        depth_path = input_depth / path.relative_to(input_img).with_suffix(".png")
+        if not depth_path.exists():
+            logger.warning(f"No depth map found for image {path} (skipping)")
+            continue
+        input_depth_paths.append(depth_path)
     assert len(input_depth_paths) == len(input_img_paths)
     logger.info(f"Found {len(input_depth_paths):,} input image-depth pairs")
 
@@ -153,13 +146,10 @@ def main(
                 interpolation=[cv2.INTER_LINEAR, cv2.INTER_NEAREST, cv2.INTER_LINEAR],
             )
         )
-        if output_depth.is_dir():
-            save_dir = (output_depth / img_path.relative_to(input_img)).parent
-            if not save_dir.exists():
-                save_dir.mkdir(parents=True)
-            save_path = save_dir / f"{img_path.stem}_vis.jpg"
-        else:
-            save_path = output_depth
+        save_dir = (output_depth / img_path.relative_to(input_img)).parent
+        if not save_dir.exists():
+            save_dir.mkdir(parents=True)
+        save_path = save_dir / f"{img_path.stem}_vis.jpg"
         grid_img.save(save_path)
         logger.info(f"Saved visualization of output depth map at {save_path}")
 
