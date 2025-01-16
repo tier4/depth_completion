@@ -21,7 +21,8 @@ from utils import (
     to_depth,
 )
 
-DEPTH_CKPT = "prs-eth/marigold-depth-v1-0"
+MARIGOLD_CKPT_ORIGINAL = "prs-eth/marigold-v1-0"
+MARIGOLD_CKPT_LCM = "prs-eth/marigold-lcm-v1-0"
 EPSILON = 1e-6
 
 
@@ -35,6 +36,21 @@ EPSILON = 1e-6
     type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
 )
 @click.argument("out_dir", type=click.Path(exists=False, path_type=Path))
+@click.option(
+    "--model",
+    type=click.Choice(["original", "lcm"]),
+    default="original",
+    help="Marigold model to use for depth completion. "
+    "original - The first Marigold Depth checkpoint, "
+    "which predicts affine-invariant depth maps. "
+    "Designed to be used with the DDIMScheduler at inference, "
+    "it requires at least 10 steps to get reliable predictions. "
+    "lcm - The fast Marigold Depth checkpoint, fine-tuned from original. "
+    "Designed to be used with the LCMScheduler at inference, it requires as "
+    "little as 1 step to get reliable predictions. "
+    "The prediction reliability saturates at 4 steps and declines after that.",
+    show_default=True,
+)
 @click.option(
     "-n",
     "--steps",
@@ -84,6 +100,7 @@ def main(
     img_dir: Path,
     depth_dir: Path,
     out_dir: Path,
+    model: str,
     steps: int,
     resolution: int,
     max_distance: float,
@@ -115,9 +132,17 @@ def main(
         out_dir.mkdir(parents=True)
         logger.info(f"Created output directory at {out_dir}")
 
+    if model == "original":
+        model_ckpt_name = MARIGOLD_CKPT_ORIGINAL
+    elif model == "lcm":
+        model_ckpt_name = MARIGOLD_CKPT_LCM
+    else:
+        logger.critical(f"Invalid marigold model: {model}")
+        sys.exit(1)
+
     # Initialize pipeline
     pipe = MarigoldDepthCompletionPipeline.from_pretrained(
-        DEPTH_CKPT, prediction_type="depth"
+        model_ckpt_name, prediction_type="depth"
     ).to(torch.device("cuda"))
     pipe.scheduler = DDIMScheduler.from_config(
         pipe.scheduler.config, timestep_spacing="trailing"
