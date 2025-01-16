@@ -46,7 +46,7 @@ pip install -r requirements.txt
 The script performs densification of the input sparse depth, provided as a sparse numpy array, 
 and saves the output as a dense numpy array, along with the visualization. 
 Optimal default settings are applied.
-By default, it processes the [teaser image](data/image.png) and uses [100-point guidance](data/sparse_100.npy). 
+By default, it processes the [teaser image](media/image.png) and uses [100-point guidance](media/sparse_100.npy). 
 
 🏃🏻‍♂️‍➡️ Simply run as follows:
 ```bash

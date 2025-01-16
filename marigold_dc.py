@@ -251,13 +251,19 @@ def main() -> None:
 
     DEPTH_CHECKPOINT = "prs-eth/marigold-depth-v1-0"
     parser.add_argument(
-        "--in-image", type=str, default="data/image.png", help="Input image"
+        "--in-image", type=str, default="media/image.png", help="Input image"
     )
     parser.add_argument(
-        "--in-depth", type=str, default="data/sparse_100.npy", help="Input sparse depth"
+        "--in-depth",
+        type=str,
+        default="media/sparse_100.npy",
+        help="Input sparse depth",
     )
     parser.add_argument(
-        "--out-depth", type=str, default="data/dense_100.npy", help="Output dense depth"
+        "--out-depth",
+        type=str,
+        default="media/dense_100.npy",
+        help="Output dense depth",
     )
     parser.add_argument(
         "--num_inference_steps", type=int, default=50, help="Denoising steps"
