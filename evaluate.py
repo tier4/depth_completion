@@ -116,6 +116,9 @@ def main(
     # Get paths of input images
     input_img_paths = get_img_paths(img_dir)
 
+    # Sort input image paths by filename
+    input_img_paths.sort(key=lambda x: x.name)
+
     # Get paths of input depth maps
     input_depth_paths: list[Path] = []
     for path in input_img_paths:
