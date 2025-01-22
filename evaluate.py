@@ -96,6 +96,13 @@ EPSILON = 1e-6
     show_default=True,
     help="Whether to calculate and save metrics.",
 )
+@click.option(
+    "--log",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path to save logs. If not set, logs will only be shown in stdout.",
+    show_default=True,
+)
 def main(
     img_dir: Path,
     depth_dir: Path,
@@ -107,7 +114,15 @@ def main(
     output_size: list[int] | None,
     visualize: bool,
     calc_metrics: bool,
+    log: Path | None,
 ) -> None:
+    # Configure logger if log path is provided
+    if log is not None:
+        if not log.parent.exists():
+            log.parent.mkdir(parents=True)
+        logger.add(log, rotation="10 MB")
+        logger.info(f"Saving logs to {log}")
+
     # Check if CUDA is available
     if not torch.cuda.is_available():
         logger.critical("CUDA must be available to run this script.")
