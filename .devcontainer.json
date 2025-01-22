@@ -38,6 +38,9 @@
           "source.fixAll.ruff": "explicit",
           "source.organizeImports.ruff": "explicit"
         },
+        "[toml]": {
+          "editor.defaultFormatter": "tamasfe.even-better-toml"
+        },
         "[python]": {
           "editor.defaultFormatter": "ms-python.black-formatter"
         },
@@ -57,7 +60,8 @@
         "charliermarsh.ruff",
         "donjayamanne.githistory",
         "ms-azuretools.vscode-docker",
-        "esbenp.prettier-vscode"
+        "esbenp.prettier-vscode",
+        "tamasfe.even-better-toml"
       ]
     }
   }

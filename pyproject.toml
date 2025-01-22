@@ -25,6 +25,8 @@ select = [
     "SIM",
     # isort
     "I",
+    # pyupgrade
+    "UP",
 ]
 ignore = [
     "E741", # anbiguous-variable-name
@@ -39,3 +41,15 @@ platform = "linux"
 disallow_untyped_defs = true
 ignore_missing_imports = true
 allow_redefinition = true
+
+[tool.pyright]
+exclude = [
+    "data",
+    "**/.mypy_cache",
+    "**/.cache",
+    "**/.git",
+    "**/.hypothesis",
+    "**/__pycache__",
+    "**/site-packages",
+]
+typeCheckingMode = "off"
