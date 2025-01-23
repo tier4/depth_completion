@@ -292,12 +292,16 @@ def main(
                 "inference": duration_pred,
             },
         }
+        logger.info(f"Inference duration: {duration_pred:.3f} [s]")
+        logger.info(f"Depth error (all): {result['error']['all']}")
         result["error"]["binned"] = []
         for bin_idx in range(num_bins):
             bin_start = bin_idx * bin_size
             bin_end = min(bin_start + bin_size, max_distance)
             if bin_idx == num_bins - 1:
                 bin_mask = (depth_map >= bin_start) & (depth_map <= max_distance)
+            elif bin_idx == 0:
+                bin_mask = (depth_map >= EPSILON) & (depth_map < bin_end)
             else:
                 bin_mask = (depth_map >= bin_start) & (depth_map < bin_end)
             is_empty = bin_mask.sum() == 0
@@ -312,6 +316,9 @@ def main(
                         rmse(depth_map_pred, depth_map, mask=bin_mask) if not is_empty else None
                     ),
                 }
+            )
+            logger.info(
+                f"Depth error ({bin_start}-{bin_end}): {result['error']['binned'][bin_idx]}"
             )
         result_key = str(depth_map_pred_path.relative_to(out_dir))
         results[result_key] = result
@@ -341,7 +348,8 @@ def main(
                     for metric_name in metric_names:
                         values = [v[metric_type][mask_type][metric_name] for v in results.values()]
                         results_final[metric_type][mask_type][metric_name] = {
-                            method: reduce(np.array(values), method) for method in reduce_methods
+                            method: reduce(np.array(values), method) if len(values) > 0 else None
+                            for method in reduce_methods
                         }
                 elif mask_type == "binned":
                     results_final[metric_type][mask_type] = []
