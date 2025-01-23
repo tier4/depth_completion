@@ -8,7 +8,7 @@ import click
 import cv2
 import numpy as np
 import torch
-from diffusers import DDIMScheduler
+from diffusers import AutoencoderTiny, DDIMScheduler
 from loguru import logger
 from PIL import Image
 
@@ -27,6 +27,7 @@ from utils import (
 
 MARIGOLD_CKPT_ORIGINAL = "prs-eth/marigold-v1-0"
 MARIGOLD_CKPT_LCM = "prs-eth/marigold-lcm-v1-0"
+VAE_CKPT_LIGHT = "madebyollin/taesd"
 EPSILON = 1e-6
 
 
@@ -53,6 +54,15 @@ EPSILON = 1e-6
     "Designed to be used with the LCMScheduler at inference, it requires as "
     "little as 1 step to get reliable predictions. "
     "The prediction reliability saturates at 4 steps and declines after that.",
+    show_default=True,
+)
+@click.option(
+    "--vae",
+    type=click.Choice(["original", "light"]),
+    default="original",
+    help="VAE model to use for depth completion. "
+    "original - The original VAE model from Marigold (e.g. Stable Diffusion VAE). "
+    f"light - A lightweight VAE model from {VAE_CKPT_LIGHT}.",
     show_default=True,
 )
 @click.option(
@@ -112,7 +122,8 @@ def main(
     img_dir: Path,
     depth_dir: Path,
     out_dir: Path,
-    model: str,
+    model: Literal["original", "lcm"],
+    vae: Literal["original", "light"],
     steps: int,
     resolution: int,
     max_distance: float,
@@ -155,25 +166,22 @@ def main(
         out_dir.mkdir(parents=True)
         logger.info(f"Created output directory at {out_dir}")
 
-    # Select backbone model checkpoint
-    if model == "original":
-        model_ckpt_name = MARIGOLD_CKPT_ORIGINAL
-    elif model == "lcm":
-        model_ckpt_name = MARIGOLD_CKPT_LCM
-    else:
-        logger.critical(f"Invalid marigold model: {model}")
-        sys.exit(1)
-    logger.info(f"Load backbone model from checkpoint {model_ckpt_name}")
-
     # Initialize pipeline
     # NOTE: Do not use float16 as it will make nans in predictions
+    model_ckpt_name = MARIGOLD_CKPT_ORIGINAL if model == "original" else MARIGOLD_CKPT_LCM
+    torch_dtype = torch.bfloat16 if precision == "bf16" else torch.float32
     pipe = MarigoldDepthCompletionPipeline.from_pretrained(
         model_ckpt_name,
         prediction_type="depth",
-        torch_dtype=torch.bfloat16 if precision == "bf16" else torch.float32,
+        torch_dtype=torch_dtype,
     ).to("cuda")
+    if vae == "light":
+        del pipe.vae
+        pipe.vae = AutoencoderTiny.from_pretrained(VAE_CKPT_LIGHT, torch_dtype=torch_dtype).to(
+            "cuda"
+        )
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
-    logger.info(f"Initialized inference pipeline (precision={precision})")
+    logger.info(f"Initialized inference pipeline (model={model}, vae={vae}, precision={precision})")
 
     # Evaluation loop
     results: dict[str, Any] = {}
