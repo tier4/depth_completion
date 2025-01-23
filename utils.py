@@ -256,6 +256,18 @@ def make_grid(
     return grid
 
 
+def has_nan(x: np.ndarray) -> bool:
+    """Check if a numpy array contains any NaN values.
+
+    Args:
+        x (np.ndarray): Input array to check
+
+    Returns:
+        bool: True if array contains NaN values, False otherwise
+    """
+    return np.isnan(x).any()
+
+
 def reduce(x: np.ndarray, method: str, axis: int | None = None) -> float:
     """Reduce a numpy array using the specified method along an optional axis.
 

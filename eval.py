@@ -2,7 +2,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import click
 import cv2
@@ -16,6 +16,7 @@ from marigold_dc import MarigoldDepthCompletionPipeline
 from utils import (
     CommaSeparated,
     get_img_paths,
+    has_nan,
     load_img,
     mae,
     make_grid,
@@ -99,6 +100,14 @@ EPSILON = 1e-6
     help="Path to save logs. If not set, logs will only be shown in stdout.",
     show_default=True,
 )
+@click.option(
+    "-p",
+    "--precision",
+    type=click.Choice(["bf16", "fp32"]),
+    default="fp32",
+    help="Inference precision.",
+    show_default=True,
+)
 def main(
     img_dir: Path,
     depth_dir: Path,
@@ -110,6 +119,7 @@ def main(
     output_size: list[int] | None,
     visualize: bool,
     log: Path | None,
+    precision: Literal["bf16", "fp32"],
 ) -> None:
     # Configure logger if log path is provided
     if log is not None:
@@ -156,11 +166,14 @@ def main(
     logger.info(f"Load backbone model from checkpoint {model_ckpt_name}")
 
     # Initialize pipeline
+    # NOTE: Do not use float16 as it will make nans in predictions
     pipe = MarigoldDepthCompletionPipeline.from_pretrained(
-        model_ckpt_name, prediction_type="depth"
+        model_ckpt_name,
+        prediction_type="depth",
+        torch_dtype=torch.bfloat16 if precision == "bf16" else torch.float32,
     ).to("cuda")
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
-    logger.info("Initialized inference pipeline")
+    logger.info(f"Initialized inference pipeline (precision={precision})")
 
     # Evaluation loop
     results: dict[str, Any] = {}
@@ -192,6 +205,9 @@ def main(
             processing_resolution=resolution,
         )
         duration_pred = time.time() - start_time
+        if has_nan(depth_map_pred):
+            logger.warning("NaN values found in depth map prediction (skipping)")
+            continue
         logger.info(f"Inference took {duration_pred:.3f} seconds")
 
         # Save predicted depth map
@@ -254,6 +270,10 @@ def main(
         result_key = str(depth_map_pred_path.relative_to(out_dir))
         results[result_key] = result
         logger.info(f"Evaluation results: {result}")
+
+    if len(results.keys()) == 0:
+        logger.warning("No valid evaluation results found")
+        sys.exit(1)
 
     # Save metric values for all inputs
     results_path = out_dir / "results.json"
