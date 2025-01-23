@@ -233,10 +233,11 @@ def make_grid(
     if resize is not None:
         th, tw = resize
         if th != -1 or tw != -1:
-            if isinstance(interpolation, Sequence):
-                methods = interpolation
-            else:
-                methods = [interpolation] * n
+            methods = (
+                interpolation
+                if isinstance(interpolation, Sequence)
+                else [interpolation] * n
+            )
             target_h = th if th != -1 else int(tw * grid_h / grid_w)
             target_w = tw if tw != -1 else int(th * grid_w / grid_h)
             # Calculate individual image size based on grid target size

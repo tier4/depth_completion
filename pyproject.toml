@@ -1,9 +1,9 @@
 [tool.black]
 target-version = ["py311"]
-line-length = 88
+line-length = 100
 
 [tool.ruff]
-line-length = 88
+line-length = 100
 target-version = "py311"
 indent-width = 4
 
@@ -27,6 +27,8 @@ select = [
     "I",
     # pyupgrade
     "UP",
+    # perflint
+    "PERF",
 ]
 ignore = [
     "E741", # anbiguous-variable-name
