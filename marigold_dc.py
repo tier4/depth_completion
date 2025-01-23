@@ -91,9 +91,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     return_tensors="pt",
                 )
                 text_input_ids = text_inputs.input_ids.to(device)
-                self.empty_text_embedding = self.text_encoder(text_input_ids)[
-                    0
-                ]  # [1,2,1024]
+                self.empty_text_embedding = self.text_encoder(text_input_ids)[0]  # [1,2,1024]
 
         # Preprocess input images
         image, padding, original_resolution = self.image_processor.preprocess(
@@ -122,9 +120,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         logging.info(f"Using {sparse_mask.int().sum().item()} guidance points")
 
         # Set up optimization targets and compute the range and lower bound of the sparse depth
-        scale, shift = torch.nn.Parameter(
+        scale, shift = torch.nn.Parameter(torch.ones(1, device=device)), torch.nn.Parameter(
             torch.ones(1, device=device)
-        ), torch.nn.Parameter(torch.ones(1, device=device))
+        )
         pred_latent = torch.nn.Parameter(pred_latent)
         depth_min = sparse_depth[sparse_mask].min()
         depth_max = sparse_depth[sparse_mask].max()
@@ -147,13 +145,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         def latent_to_metric(latent: torch.Tensor) -> torch.Tensor:
             # Decode latent to affine invariant depth
             # predictions and subsequently to metric depth predictions.
-            affine_invariant_prediction = self.decode_prediction(
-                latent
-            )  # [E,1,PPH,PPW]
+            affine_invariant_prediction = self.decode_prediction(latent)  # [E,1,PPH,PPW]
             prediction = affine_to_metric(affine_invariant_prediction)
-            prediction = self.image_processor.unpad_image(
-                prediction, padding
-            )  # [E,1,PH,PW]
+            prediction = self.image_processor.unpad_image(prediction, padding)  # [E,1,PH,PW]
             prediction = self.image_processor.resize_antialias(
                 prediction, original_resolution, "bilinear", is_aa=False
             )  # [1,1,H,W]
@@ -168,11 +162,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
         # Denoising loop
         self.scheduler.set_timesteps(num_inference_steps, device=device)
-        for _, t in enumerate(
-            self.progress_bar(
-                self.scheduler.timesteps, desc=f"Marigold-DC steps ({str(device)})..."
-            )
-        ):
+        for t in self.scheduler.timesteps:
             optimizer.zero_grad()
 
             # Forward pass through the U-Net
@@ -190,22 +180,16 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             with torch.no_grad():
                 alpha_prod_t = self.scheduler.alphas_cumprod[t]
                 beta_prod_t = 1 - alpha_prod_t
-                pred_epsilon = (alpha_prod_t**0.5) * noise + (
-                    beta_prod_t**0.5
-                ) * pred_latent
+                pred_epsilon = (alpha_prod_t**0.5) * noise + (beta_prod_t**0.5) * pred_latent
 
-            step_output = self.scheduler.step(
-                noise, t, pred_latent, generator=generator
-            )
+            step_output = self.scheduler.step(noise, t, pred_latent, generator=generator)
 
             # Preview the final output depth with Tweedie's formula (See Equation 1 of the paper)
             pred_original_sample = step_output.pred_original_sample
 
             # Decode to metric space, compute loss with guidance and backpropagate
             current_metric_estimate = latent_to_metric(pred_original_sample)
-            loss = loss_l1l2(
-                current_metric_estimate[sparse_mask], sparse_depth[sparse_mask]
-            )
+            loss = loss_l1l2(current_metric_estimate[sparse_mask], sparse_depth[sparse_mask])
             loss.backward()
 
             # Scale gradients up
@@ -250,9 +234,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Marigold-DC Pipeline")
 
     DEPTH_CHECKPOINT = "prs-eth/marigold-depth-v1-0"
-    parser.add_argument(
-        "--in-image", type=str, default="media/image.png", help="Input image"
-    )
+    parser.add_argument("--in-image", type=str, default="media/image.png", help="Input image")
     parser.add_argument(
         "--in-depth",
         type=str,
@@ -265,15 +247,11 @@ def main() -> None:
         default="media/dense_100.npy",
         help="Output dense depth",
     )
-    parser.add_argument(
-        "--num_inference_steps", type=int, default=50, help="Denoising steps"
-    )
+    parser.add_argument("--num_inference_steps", type=int, default=50, help="Denoising steps")
     parser.add_argument(
         "--processing_resolution", type=int, default=768, help="Denoising resolution"
     )
-    parser.add_argument(
-        "--checkpoint", type=str, default=DEPTH_CHECKPOINT, help="Depth checkpoint"
-    )
+    parser.add_argument("--checkpoint", type=str, default=DEPTH_CHECKPOINT, help="Depth checkpoint")
     args = parser.parse_args()
 
     num_inference_steps = args.num_inference_steps
@@ -302,16 +280,12 @@ def main() -> None:
     pipe = MarigoldDepthCompletionPipeline.from_pretrained(
         args.checkpoint, prediction_type="depth"
     ).to(device)
-    pipe.scheduler = DDIMScheduler.from_config(
-        pipe.scheduler.config, timestep_spacing="trailing"
-    )
+    pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
 
     if not torch.cuda.is_available():
         logging.warning("CUDA not found: Using a lightweight VAE")
         del pipe.vae
-        pipe.vae = diffusers.AutoencoderTiny.from_pretrained("madebyollin/taesd").to(
-            device
-        )
+        pipe.vae = diffusers.AutoencoderTiny.from_pretrained("madebyollin/taesd").to(device)
 
     pred = pipe(
         image=Image.open(args.in_image),
@@ -321,9 +295,7 @@ def main() -> None:
     )
 
     np.save(args.out_depth, pred)
-    vis = pipe.image_processor.visualize_depth(
-        pred, val_min=pred.min(), val_max=pred.max()
-    )[0]
+    vis = pipe.image_processor.visualize_depth(pred, val_min=pred.min(), val_max=pred.max())[0]
     vis.save(os.path.splitext(args.out_depth)[0] + "_vis.jpg")
 
 
