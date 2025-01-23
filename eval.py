@@ -1,4 +1,5 @@
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -89,6 +90,13 @@ EPSILON = 1e-6
     show_default=True,
 )
 @click.option(
+    "--bin-size",
+    type=click.FloatRange(min=0, min_open=True),
+    default=10.0,
+    help="Bin size [m] of input sparse depth maps for error evaluation.",
+    show_default=True,
+)
+@click.option(
     "-os",
     "--output-size",
     type=CommaSeparated(int, n=2),
@@ -127,6 +135,7 @@ def main(
     steps: int,
     resolution: int,
     max_distance: float,
+    bin_size: float,
     output_size: list[int] | None,
     visualize: bool,
     log: Path | None,
@@ -142,6 +151,14 @@ def main(
     # Check if CUDA is available
     if not torch.cuda.is_available():
         logger.critical("CUDA must be available to run this script.")
+        sys.exit(1)
+
+    # Check if bin size is less than max distance
+    if bin_size > max_distance:
+        logger.critical(
+            "Bin size must be less than max distance for error evaluation. "
+            f"Got bin_size={bin_size} and max_distance={max_distance}."
+        )
         sys.exit(1)
 
     # Get paths of input images
@@ -185,6 +202,7 @@ def main(
 
     # Evaluation loop
     results: dict[str, Any] = {}
+    num_bins = math.ceil(max_distance / bin_size)
     for i, (img_path, depth_path) in enumerate(zip(img_paths, depth_img_paths, strict=True)):
         logger.info(f"[{i+1:,} / {len(img_paths):,}] " f"Processing {img_path} and {depth_path}")
 
@@ -216,7 +234,6 @@ def main(
         if has_nan(depth_map_pred):
             logger.warning("NaN values found in depth map prediction (skipping)")
             continue
-        logger.info(f"Inference took {duration_pred:.3f} seconds")
 
         # Save predicted depth map
         save_dir = (out_dir / "depth" / img_path.relative_to(img_dir)).parent
@@ -275,9 +292,29 @@ def main(
                 "inference": duration_pred,
             },
         }
+        result["error"]["binned"] = []
+        for bin_idx in range(num_bins):
+            bin_start = bin_idx * bin_size
+            bin_end = min(bin_start + bin_size, max_distance)
+            if bin_idx == num_bins - 1:
+                bin_mask = (depth_map >= bin_start) & (depth_map <= max_distance)
+            else:
+                bin_mask = (depth_map >= bin_start) & (depth_map < bin_end)
+            is_empty = bin_mask.sum() == 0
+            if is_empty:
+                logger.warning(f"Empty bin found: {bin_start} - {bin_end} (skipping)")
+            result["error"]["binned"].append(
+                {
+                    "bin_start": bin_start,
+                    "bin_end": bin_end,
+                    "mae": mae(depth_map_pred, depth_map, mask=bin_mask) if not is_empty else None,
+                    "rmse": (
+                        rmse(depth_map_pred, depth_map, mask=bin_mask) if not is_empty else None
+                    ),
+                }
+            )
         result_key = str(depth_map_pred_path.relative_to(out_dir))
         results[result_key] = result
-        logger.info(f"Evaluation results: {result}")
 
     if len(results.keys()) == 0:
         logger.warning("No valid evaluation results found")
@@ -292,16 +329,40 @@ def main(
     # Calc final metrics
     results_final: dict[str, Any] = {}
     reduce_methods = ["mean", "std", "median", "min", "max"]
-    for metric_type in result:
+    mask_types = ["all", "binned"]
+    metric_types = ["error", "duration"]
+    metric_names = ["mae", "rmse"]
+    for metric_type in metric_types:
         results_final[metric_type] = {}
         if metric_type == "error":
-            for mask_type in result[metric_type]:
-                results_final[metric_type][mask_type] = {}
-                for metric_name in result[metric_type][mask_type]:
-                    values = [v[metric_type][mask_type][metric_name] for v in results.values()]
-                    results_final[metric_type][mask_type][metric_name] = {
-                        method: reduce(np.array(values), method) for method in reduce_methods
-                    }
+            for mask_type in mask_types:
+                if mask_type == "all":
+                    results_final[metric_type][mask_type] = {}
+                    for metric_name in metric_names:
+                        values = [v[metric_type][mask_type][metric_name] for v in results.values()]
+                        results_final[metric_type][mask_type][metric_name] = {
+                            method: reduce(np.array(values), method) for method in reduce_methods
+                        }
+                elif mask_type == "binned":
+                    results_final[metric_type][mask_type] = []
+                    for bin_idx in range(num_bins):
+                        bin_start = bin_idx * bin_size
+                        bin_end = min(bin_start + bin_size, max_distance)
+                        results_final[metric_type][mask_type].append(
+                            {"bin_start": bin_start, "bin_end": bin_end}
+                        )
+                        for metric_name in metric_names:
+                            values = [
+                                v[metric_type][mask_type][bin_idx][metric_name]
+                                for v in results.values()
+                                if v[metric_type][mask_type][bin_idx][metric_name] is not None
+                            ]
+                            results_final[metric_type][mask_type][bin_idx][metric_name] = {
+                                method: (
+                                    reduce(np.array(values), method) if len(values) > 0 else None
+                                )
+                                for method in reduce_methods
+                            }
         elif metric_type == "duration":
             for duration_type in result[metric_type]:
                 values = [v[metric_type][duration_type] for v in results.values()]
@@ -311,7 +372,6 @@ def main(
     results_final_path = out_dir / "results_final.json"
     with open(results_final_path, "w") as f:
         json.dump(results_final, f, indent=2)
-    logger.info(f"Final metrics: {results_final}")
     logger.info(f"Saved final evaluation results at {results_final_path}")
 
 
