@@ -129,6 +129,35 @@ def is_empty_img(img: Image.Image) -> bool:
     return not np.any(np.array(img))
 
 
+def load_img(path: Path, mode: str | None = None) -> tuple[Image.Image, bool]:
+    """Load an image from a file path and check if it's empty.
+
+    Opens an image file using PIL and optionally converts it to a specific color mode.
+    Also checks if the image is empty (all values are 0).
+
+    Args:
+        path (Path): Path to the image file to load
+        mode (str | None, optional): PIL color mode to convert image
+            to (e.g. 'RGB', 'L'). If None, keeps original mode.
+            Defaults to None.
+
+    Returns:
+        tuple[Image.Image, bool]: A tuple containing:
+            - The loaded PIL Image object
+            - A boolean indicating if the image is non-empty (True) or empty (False)
+
+    Example:
+        >>> # Load RGB image
+        >>> img, is_valid = load_img(Path("image.jpg"), mode="RGB")
+        >>> # Load grayscale image
+        >>> img, is_valid = load_img(Path("depth.png"), mode="L")
+    """
+    img = Image.open(path).convert(mode)
+    if is_empty_img(img):
+        return img, False
+    return img, True
+
+
 def make_grid(
     imgs: np.ndarray,
     rows: int | None = None,
@@ -230,7 +259,7 @@ def make_grid(
     return grid
 
 
-def to_depth(
+def to_depth_map(
     img: Image.Image, dtype: str = "float32", max_distance: float = 120.0
 ) -> np.ndarray:
     """Convert a PIL Image to a depth map.
