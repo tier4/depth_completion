@@ -1,5 +1,6 @@
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from utils import (
     load_img,
     mae,
     make_grid,
+    reduce,
     rmse,
     to_depth_map,
 )
@@ -157,19 +159,13 @@ def main(
     pipe = MarigoldDepthCompletionPipeline.from_pretrained(
         model_ckpt_name, prediction_type="depth"
     ).to("cuda")
-    pipe.scheduler = DDIMScheduler.from_config(
-        pipe.scheduler.config, timestep_spacing="trailing"
-    )
+    pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
     logger.info("Initialized inference pipeline")
 
     # Evaluation loop
     results: dict[str, Any] = {}
-    for i, (img_path, depth_path) in enumerate(
-        zip(img_paths, depth_img_paths, strict=True)
-    ):
-        logger.info(
-            f"[{i+1:,} / {len(img_paths):,}] " f"Processing {img_path} and {depth_path}"
-        )
+    for i, (img_path, depth_path) in enumerate(zip(img_paths, depth_img_paths, strict=True)):
+        logger.info(f"[{i+1:,} / {len(img_paths):,}] " f"Processing {img_path} and {depth_path}")
 
         # Load camera image
         img, is_valid = load_img(img_path, "RGB")
@@ -188,12 +184,15 @@ def main(
         depth_mask = depth_map > EPSILON
 
         # Run inference
+        start_time = time.time()
         depth_map_pred = pipe(
             image=img,
             sparse_depth=depth_map,
             num_inference_steps=steps,
             processing_resolution=resolution,
         )
+        duration_pred = time.time() - start_time
+        logger.info(f"Inference took {duration_pred:.3f} seconds")
 
         # Save predicted depth map
         save_dir = (out_dir / "depth" / img_path.relative_to(img_dir)).parent
@@ -223,11 +222,7 @@ def main(
                     ),
                     rows=1,
                     cols=3,
-                    resize=(
-                        (output_size[0], output_size[1])
-                        if output_size is not None
-                        else None
-                    ),
+                    resize=((output_size[0], output_size[1]) if output_size is not None else None),
                     # NOTE: Resize depth map with nearest neighbor interpolation
                     interpolation=[
                         cv2.INTER_LINEAR,
@@ -239,17 +234,22 @@ def main(
             save_dir = (out_dir / "vis" / img_path.relative_to(img_dir)).parent
             if not save_dir.exists():
                 save_dir.mkdir(parents=True)
-                logger.info(
-                    f"Created directory for saving visualization outputs at {save_dir}"
-                )
+                logger.info(f"Created directory for saving visualization outputs at {save_dir}")
             vis_img_path = save_dir / f"{img_path.stem}_vis.jpg"
             vis_img.save(vis_img_path)
             logger.info(f"Saved visualization outputs at {vis_img_path}")
 
         # Save evaluation results for this input
-        result = {
-            "mae": mae(depth_map_pred, depth_map, mask=depth_mask),
-            "rmse": rmse(depth_map_pred, depth_map, mask=depth_mask),
+        result: dict[str, Any] = {
+            "error": {
+                "all": {
+                    "mae": mae(depth_map_pred, depth_map, mask=depth_mask),
+                    "rmse": rmse(depth_map_pred, depth_map, mask=depth_mask),
+                }
+            },
+            "duration": {
+                "inference": duration_pred,
+            },
         }
         result_key = str(depth_map_pred_path.relative_to(out_dir))
         results[result_key] = result
@@ -263,14 +263,23 @@ def main(
 
     # Calc final metrics
     results_final: dict[str, Any] = {}
-    for metric_name in ["mae", "rmse"]:
-        scores = [score[metric_name] for score in results.values()]
-        results_final[metric_name] = {}
-        results_final[metric_name]["mean"] = float(np.mean(scores))
-        results_final[metric_name]["sigma"] = float(np.std(scores))
-        results_final[metric_name]["median"] = float(np.median(scores))
-        results_final[metric_name]["min"] = float(np.min(scores))
-        results_final[metric_name]["max"] = float(np.max(scores))
+    reduce_methods = ["mean", "std", "median", "min", "max"]
+    for metric_type in result:
+        results_final[metric_type] = {}
+        if metric_type == "error":
+            for mask_type in result[metric_type]:
+                results_final[metric_type][mask_type] = {}
+                for metric_name in result[metric_type][mask_type]:
+                    values = [v[metric_type][mask_type][metric_name] for v in results.values()]
+                    results_final[metric_type][mask_type][metric_name] = {
+                        method: reduce(np.array(values), method) for method in reduce_methods
+                    }
+        elif metric_type == "duration":
+            for duration_type in result[metric_type]:
+                values = [v[metric_type][duration_type] for v in results.values()]
+                results_final[metric_type][duration_type] = {
+                    method: reduce(np.array(values), method) for method in reduce_methods
+                }
     results_final_path = out_dir / "results_final.json"
     with open(results_final_path, "w") as f:
         json.dump(results_final, f, indent=2)

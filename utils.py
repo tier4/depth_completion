@@ -233,11 +233,7 @@ def make_grid(
     if resize is not None:
         th, tw = resize
         if th != -1 or tw != -1:
-            methods = (
-                interpolation
-                if isinstance(interpolation, Sequence)
-                else [interpolation] * n
-            )
+            methods = interpolation if isinstance(interpolation, Sequence) else [interpolation] * n
             target_h = th if th != -1 else int(tw * grid_h / grid_w)
             target_w = tw if tw != -1 else int(th * grid_w / grid_h)
             # Calculate individual image size based on grid target size
@@ -258,6 +254,47 @@ def make_grid(
         grid[i * h : (i + 1) * h, j * w : (j + 1) * w] = imgs[idx]
 
     return grid
+
+
+def reduce(x: np.ndarray, method: str, axis: int | None = None) -> float:
+    """Reduce a numpy array using the specified method along an optional axis.
+
+    Args:
+        x (np.ndarray): Input array to reduce
+        method (str): Reduction method to use. Must be one of:
+            - "mean": Calculate arithmetic mean
+            - "median": Calculate median value
+            - "min": Find minimum value
+            - "max": Find maximum value
+            - "std": Calculate standard deviation
+        axis (int | None, optional): Axis along which to perform reduction.
+            If None, reduction is performed over the entire array. Defaults to None.
+
+    Returns:
+        float: Result of the reduction operation
+
+    Raises:
+        ValueError: If an invalid reduction method is specified
+
+    Examples:
+        >>> x = np.array([[1, 2, 3], [4, 5, 6]])
+        >>> reduce(x, "mean")  # Mean of entire array
+        3.5
+        >>> reduce(x, "max", axis=0)  # Max along first axis
+        array([4., 5., 6.])
+    """
+    if method == "mean":
+        return float(np.mean(x, axis=axis))
+    elif method == "median":
+        return float(np.median(x, axis=axis))
+    elif method == "min":
+        return float(np.min(x, axis=axis))
+    elif method == "max":
+        return float(np.max(x, axis=axis))
+    elif method == "std":
+        return float(np.std(x, axis=axis))
+    else:
+        raise ValueError(f"Invalid reduction method: {method}")
 
 
 def to_depth_map(
