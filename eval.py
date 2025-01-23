@@ -114,7 +114,7 @@ EPSILON = 1e-6
     "-p",
     "--precision",
     type=click.Choice(["bf16", "fp32"]),
-    default="fp32",
+    default="bf16",
     help="Inference precision.",
     show_default=True,
 )
