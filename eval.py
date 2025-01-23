@@ -1,6 +1,7 @@
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 import cv2
@@ -90,13 +91,6 @@ EPSILON = 1e-6
     help="Whether to save visualization of output depth maps.",
 )
 @click.option(
-    "--calc-metrics",
-    type=bool,
-    default=True,
-    show_default=True,
-    help="Whether to calculate and save metrics.",
-)
-@click.option(
     "--log",
     type=click.Path(path_type=Path),
     default=None,
@@ -113,7 +107,6 @@ def main(
     max_distance: float,
     output_size: list[int] | None,
     visualize: bool,
-    calc_metrics: bool,
     log: Path | None,
 ) -> None:
     # Configure logger if log path is provided
@@ -129,27 +122,28 @@ def main(
         sys.exit(1)
 
     # Get paths of input images
-    input_img_paths = get_img_paths(img_dir)
+    img_paths = get_img_paths(img_dir)
 
     # Sort input image paths by filename
-    input_img_paths.sort(key=lambda x: x.name)
+    img_paths.sort(key=lambda x: x.name)
 
-    # Get paths of input depth maps
-    input_depth_paths: list[Path] = []
-    for path in input_img_paths:
+    # Get paths of input depth images
+    depth_img_paths: list[Path] = []
+    for path in img_paths:
         depth_path = depth_dir / path.relative_to(img_dir).with_suffix(".png")
         if not depth_path.exists():
             logger.warning(f"No depth map found for image {path} (skipping)")
             continue
-        input_depth_paths.append(depth_path)
-    assert len(input_depth_paths) == len(input_img_paths)
-    logger.info(f"Found {len(input_depth_paths):,} input image-depth pairs")
+        depth_img_paths.append(depth_path)
+    assert len(depth_img_paths) == len(img_paths)
+    logger.info(f"Found {len(depth_img_paths):,} input image-depth pairs")
 
     # Create output directory if it doesn't exist
     if not out_dir.exists():
         out_dir.mkdir(parents=True)
         logger.info(f"Created output directory at {out_dir}")
 
+    # Select backbone model checkpoint
     if model == "original":
         model_ckpt_name = MARIGOLD_CKPT_ORIGINAL
     elif model == "lcm":
@@ -157,24 +151,24 @@ def main(
     else:
         logger.critical(f"Invalid marigold model: {model}")
         sys.exit(1)
+    logger.info(f"Load backbone model from checkpoint {model_ckpt_name}")
 
     # Initialize pipeline
     pipe = MarigoldDepthCompletionPipeline.from_pretrained(
         model_ckpt_name, prediction_type="depth"
-    ).to(torch.device("cuda"))
+    ).to("cuda")
     pipe.scheduler = DDIMScheduler.from_config(
         pipe.scheduler.config, timestep_spacing="trailing"
     )
+    logger.info("Initialized inference pipeline")
 
-    # Inference
-    logger.info("Starting inference")
-    metrics: dict[str, dict[str, float]] = {}
+    # Evaluation loop
+    results: dict[str, Any] = {}
     for i, (img_path, depth_path) in enumerate(
-        zip(input_img_paths, input_depth_paths, strict=False)
+        zip(img_paths, depth_img_paths, strict=True)
     ):
         logger.info(
-            f"[{i+1:,} / {len(input_img_paths):,}] "
-            f"Processing {img_path} and {depth_path}"
+            f"[{i+1:,} / {len(img_paths):,}] " f"Processing {img_path} and {depth_path}"
         )
 
         # Load camera image
@@ -188,9 +182,10 @@ def main(
         if not is_valid:
             logger.warning(f"Empty input depth map found: {depth_path} (skipping)")
             continue
+
         # Convert depth image to depth map
         depth_map = to_depth_map(depth_img, max_distance=max_distance)
-        mask = depth_map > EPSILON
+        depth_mask = depth_map > EPSILON
 
         # Run inference
         depth_map_pred = pipe(
@@ -205,10 +200,9 @@ def main(
         if not save_dir.exists():
             save_dir.mkdir(parents=True)
             logger.info(f"Created output directory for saving depth maps at {save_dir}")
-        save_path = save_dir / f"{img_path.stem}.npy"
-        metric_key = str(save_path.relative_to(out_dir))
-        np.save(save_path, depth_map_pred)
-        logger.info(f"Saved predicted depth map at {save_path}")
+        depth_map_pred_path = save_dir / f"{img_path.stem}.npy"
+        np.save(depth_map_pred_path, depth_map_pred)
+        logger.info(f"Saved predicted depth map at {depth_map_pred_path}")
 
         # Save visualization of predicted depth map
         if visualize:
@@ -219,9 +213,9 @@ def main(
                 depth_map, val_min=0, val_max=max_distance
             )[0]
             depth_img_ = np.array(depth_img_)
-            depth_img_[~mask] = 0
+            depth_img_[~depth_mask] = 0
             depth_img_ = Image.fromarray(depth_img_)
-            out_img = Image.fromarray(
+            vis_img = Image.fromarray(
                 make_grid(
                     np.stack(
                         [np.asarray(im) for im in [img, depth_img_, depth_img_pred]],
@@ -248,39 +242,40 @@ def main(
                 logger.info(
                     f"Created directory for saving visualization outputs at {save_dir}"
                 )
-            save_path = save_dir / f"{img_path.stem}_vis.jpg"
-            out_img.save(save_path)
-            logger.info(f"Saved visualization outputs at {save_path}")
+            vis_img_path = save_dir / f"{img_path.stem}_vis.jpg"
+            vis_img.save(vis_img_path)
+            logger.info(f"Saved visualization outputs at {vis_img_path}")
 
-        if calc_metrics:
-            metrics_item = {
-                "mae": mae(depth_map_pred, depth_map, mask=mask),
-                "rmse": rmse(depth_map_pred, depth_map, mask=mask),
-            }
-            metrics[metric_key] = metrics_item
-            logger.info(f"Metrics: {metrics_item}")
+        # Save evaluation results for this input
+        result = {
+            "mae": mae(depth_map_pred, depth_map, mask=depth_mask),
+            "rmse": rmse(depth_map_pred, depth_map, mask=depth_mask),
+        }
+        result_key = str(depth_map_pred_path.relative_to(out_dir))
+        results[result_key] = result
+        logger.info(f"Evaluation results: {result}")
 
-    if calc_metrics:
-        save_path = out_dir / "metrics.json"
-        with open(save_path, "w") as f:
-            json.dump(metrics, f, indent=2)
-        logger.info(f"Saved metrics at {save_path}")
+    # Save metric values for all inputs
+    results_path = out_dir / "results.json"
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2)
+    logger.info(f"Saved evaluation results for all inputs at {results_path}")
 
-        # Calc final metrics
-        metrics_final: dict[str, dict[str, float | tuple[float, float]]] = {}
-        for metric_name in ["mae", "rmse"]:
-            scores = [score[metric_name] for score in metrics.values()]
-            metrics_final[metric_name] = {}
-            metrics_final[metric_name]["mean"] = float(np.mean(scores))
-            metrics_final[metric_name]["sigma"] = float(np.std(scores))
-            metrics_final[metric_name]["median"] = float(np.median(scores))
-            metrics_final[metric_name]["min"] = float(np.min(scores))
-            metrics_final[metric_name]["max"] = float(np.max(scores))
-        save_path = out_dir / "metrics_final.json"
-        with open(save_path, "w") as f:
-            json.dump(metrics_final, f, indent=2)
-        logger.info(f"Final metrics: {metrics_final}")
-        logger.info(f"Saved final metrics at {save_path}")
+    # Calc final metrics
+    results_final: dict[str, Any] = {}
+    for metric_name in ["mae", "rmse"]:
+        scores = [score[metric_name] for score in results.values()]
+        results_final[metric_name] = {}
+        results_final[metric_name]["mean"] = float(np.mean(scores))
+        results_final[metric_name]["sigma"] = float(np.std(scores))
+        results_final[metric_name]["median"] = float(np.median(scores))
+        results_final[metric_name]["min"] = float(np.min(scores))
+        results_final[metric_name]["max"] = float(np.max(scores))
+    results_final_path = out_dir / "results_final.json"
+    with open(results_final_path, "w") as f:
+        json.dump(results_final, f, indent=2)
+    logger.info(f"Final metrics: {results_final}")
+    logger.info(f"Saved final evaluation results at {results_final_path}")
 
 
 if __name__ == "__main__":

@@ -6,6 +6,9 @@
 *.npz
 *.pkl
 *.json
+*.txt
+*.log
+*.csv
 
 # Directories
 .vscode/
