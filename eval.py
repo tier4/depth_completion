@@ -27,7 +27,6 @@ from utils import (
 )
 
 MARIGOLD_CKPT_ORIGINAL = "prs-eth/marigold-v1-0"
-MARIGOLD_CKPT_LCM = "prs-eth/marigold-lcm-v1-0"
 VAE_CKPT_LIGHT = "madebyollin/taesd"
 EPSILON = 1e-6
 
@@ -42,21 +41,6 @@ EPSILON = 1e-6
     type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
 )
 @click.argument("out_dir", type=click.Path(exists=False, path_type=Path))
-@click.option(
-    "--model",
-    type=click.Choice(["original", "lcm"]),
-    default="original",
-    help="Marigold model to use for depth completion. "
-    "original - The first Marigold Depth checkpoint, "
-    "which predicts affine-invariant depth maps. "
-    "Designed to be used with the DDIMScheduler at inference, "
-    "it requires at least 10 steps to get reliable predictions. "
-    "lcm - The fast Marigold Depth checkpoint, fine-tuned from original. "
-    "Designed to be used with the LCMScheduler at inference, it requires as "
-    "little as 1 step to get reliable predictions. "
-    "The prediction reliability saturates at 4 steps and declines after that.",
-    show_default=True,
-)
 @click.option(
     "--vae",
     type=click.Choice(["original", "light"]),
@@ -119,18 +103,17 @@ EPSILON = 1e-6
     show_default=True,
 )
 @click.option(
-    "-p",
-    "--precision",
+    "-dt",
+    "--dtype",
     type=click.Choice(["bf16", "fp32"]),
     default="bf16",
-    help="Inference precision.",
+    help="Data type for inference.",
     show_default=True,
 )
 def main(
     img_dir: Path,
     depth_dir: Path,
     out_dir: Path,
-    model: Literal["original", "lcm"],
     vae: Literal["original", "light"],
     steps: int,
     resolution: int,
@@ -139,7 +122,7 @@ def main(
     output_size: list[int] | None,
     visualize: bool,
     log: Path | None,
-    precision: Literal["bf16", "fp32"],
+    dtype: Literal["bf16", "fp32"],
 ) -> None:
     # Configure logger if log path is provided
     if log is not None:
@@ -185,10 +168,9 @@ def main(
 
     # Initialize pipeline
     # NOTE: Do not use float16 as it will make nans in predictions
-    model_ckpt_name = MARIGOLD_CKPT_ORIGINAL if model == "original" else MARIGOLD_CKPT_LCM
-    torch_dtype = torch.bfloat16 if precision == "bf16" else torch.float32
+    torch_dtype = torch.bfloat16 if dtype == "bf16" else torch.float32
     pipe = MarigoldDepthCompletionPipeline.from_pretrained(
-        model_ckpt_name,
+        MARIGOLD_CKPT_ORIGINAL,
         prediction_type="depth",
         torch_dtype=torch_dtype,
     ).to("cuda")
@@ -198,7 +180,7 @@ def main(
             "cuda"
         )
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
-    logger.info(f"Initialized inference pipeline (model={model}, vae={vae}, precision={precision})")
+    logger.info(f"Initialized inference pipeline (dtype={dtype}, vae={vae})")
 
     # Evaluation loop
     results: dict[str, Any] = {}
