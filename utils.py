@@ -8,6 +8,35 @@ import imagesize
 import numpy as np
 from PIL import Image
 
+CAMERA_CATEGORIES = [
+    "CAM_FRONT_WIDE",
+    "CAM_FRONT_NARROW",
+    "CAM_FRONT_RIGHT",
+    "CAM_FRONT_LEFT",
+    "CAM_BACK_RIGHT",
+    "CAM_BACK_LEFT",
+    "CAM_BACK_WIDE",
+    "CAM_BACK_NARROW",
+]
+
+
+def infer_camera_category(img_path: Path) -> str | None:
+    """Infer the camera category from an image file path.
+
+    Checks if any of the predefined camera categories (e.g. CAM_FRONT_WIDE, CAM_BACK_LEFT etc.)
+    appear in the filename. Returns the first matching category found.
+
+    Args:
+        img_path (Path): Path to the image file
+
+    Returns:
+        str | None: The inferred camera category if found in the filename, None otherwise
+    """
+    for category in CAMERA_CATEGORIES:
+        if category in img_path.name:
+            return category
+    return None
+
 
 def mae(preds: np.ndarray, depth: np.ndarray, mask: np.ndarray | None = None) -> float:
     """Calculate the mean absolute error between two depth maps.

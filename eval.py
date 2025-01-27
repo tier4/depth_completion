@@ -18,6 +18,7 @@ from utils import (
     CommaSeparated,
     get_img_paths,
     has_nan,
+    infer_camera_category,
     load_img,
     mae,
     make_grid,
@@ -188,6 +189,14 @@ def main(
     for i, (img_path, depth_path) in enumerate(zip(img_paths, depth_img_paths, strict=True)):
         logger.info(f"[{i+1:,} / {len(img_paths):,}] " f"Processing {img_path} and {depth_path}")
 
+        # Infer camera category
+        camera_category = infer_camera_category(img_path)
+        if camera_category is None:
+            logger.warning(
+                f"Could not infer camera category of this image file: {img_path} (skipping)"
+            )
+            continue
+
         # Load camera image
         img, is_valid = load_img(img_path, "RGB")
         if not is_valid:
@@ -264,6 +273,7 @@ def main(
 
         # Save evaluation results for this input
         result: dict[str, Any] = {
+            "camera_category": camera_category,
             "error": {
                 "all": {
                     "mae": mae(depth_map_pred, depth_map, mask=depth_mask),
