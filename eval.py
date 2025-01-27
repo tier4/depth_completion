@@ -15,6 +15,7 @@ from PIL import Image
 
 from marigold_dc import MarigoldDepthCompletionPipeline
 from utils import (
+    CAMERA_CATEGORIES,
     CommaSeparated,
     get_img_paths,
     has_nan,
@@ -326,49 +327,70 @@ def main(
     logger.info(f"Saved evaluation results for all inputs at {results_path}")
 
     # Calc final metrics
+    # TODO: Fix this spaghetti code
+    # Save evaluation data as a table and analyze it with pandas
     results_final: dict[str, Any] = {}
     reduce_methods = ["mean", "std", "median", "min", "max"]
     mask_types = ["all", "binned"]
     metric_types = ["error", "duration"]
     metric_names = ["mae", "rmse"]
-    for metric_type in metric_types:
-        results_final[metric_type] = {}
-        if metric_type == "error":
-            for mask_type in mask_types:
-                if mask_type == "all":
-                    results_final[metric_type][mask_type] = {}
-                    for metric_name in metric_names:
-                        values = [v[metric_type][mask_type][metric_name] for v in results.values()]
-                        results_final[metric_type][mask_type][metric_name] = {
-                            method: reduce(np.array(values), method) if len(values) > 0 else None
-                            for method in reduce_methods
-                        }
-                elif mask_type == "binned":
-                    results_final[metric_type][mask_type] = []
-                    for bin_idx in range(num_bins):
-                        bin_start = bin_idx * bin_size
-                        bin_end = min(bin_start + bin_size, max_distance)
-                        results_final[metric_type][mask_type].append(
-                            {"bin_start": bin_start, "bin_end": bin_end}
-                        )
+    for camera_category in CAMERA_CATEGORIES + ["all"]:
+        if camera_category == "all":
+            results_this_camera_category = results
+        else:
+            results_this_camera_category = {
+                k: v for k, v in results.items() if v["camera_category"] == camera_category
+            }
+        results_final[camera_category] = {}
+        for metric_type in metric_types:
+            results_final[camera_category][metric_type] = {}
+            if metric_type == "error":
+                for mask_type in mask_types:
+                    if mask_type == "all":
+                        results_final[camera_category][metric_type][mask_type] = {}
                         for metric_name in metric_names:
                             values = [
-                                v[metric_type][mask_type][bin_idx][metric_name]
-                                for v in results.values()
-                                if v[metric_type][mask_type][bin_idx][metric_name] is not None
+                                v[metric_type][mask_type][metric_name]
+                                for v in results_this_camera_category.values()
                             ]
-                            results_final[metric_type][mask_type][bin_idx][metric_name] = {
+                            results_final[camera_category][metric_type][mask_type][metric_name] = {
                                 method: (
                                     reduce(np.array(values), method) if len(values) > 0 else None
                                 )
                                 for method in reduce_methods
                             }
-        elif metric_type == "duration":
-            for duration_type in result[metric_type]:
-                values = [v[metric_type][duration_type] for v in results.values()]
-                results_final[metric_type][duration_type] = {
-                    method: reduce(np.array(values), method) for method in reduce_methods
-                }
+                    elif mask_type == "binned":
+                        results_final[camera_category][metric_type][mask_type] = []
+                        for bin_idx in range(num_bins):
+                            bin_start = bin_idx * bin_size
+                            bin_end = min(bin_start + bin_size, max_distance)
+                            results_final[camera_category][metric_type][mask_type].append(
+                                {"bin_start": bin_start, "bin_end": bin_end}
+                            )
+                            for metric_name in metric_names:
+                                values = [
+                                    v[metric_type][mask_type][bin_idx][metric_name]
+                                    for v in results_this_camera_category.values()
+                                    if v[metric_type][mask_type][bin_idx][metric_name] is not None
+                                ]
+                                results_final[camera_category][metric_type][mask_type][bin_idx][
+                                    metric_name
+                                ] = {
+                                    method: (
+                                        reduce(np.array(values), method)
+                                        if len(values) > 0
+                                        else None
+                                    )
+                                    for method in reduce_methods
+                                }
+            elif metric_type == "duration":
+                for duration_type in result[metric_type]:
+                    values = [
+                        v[metric_type][duration_type] for v in results_this_camera_category.values()
+                    ]
+                    results_final[camera_category][metric_type][duration_type] = {
+                        method: reduce(np.array(values), method) for method in reduce_methods
+                    }
     results_final_path = out_dir / "results_final.json"
     with open(results_final_path, "w") as f:
         json.dump(results_final, f, indent=2)
