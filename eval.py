@@ -44,7 +44,7 @@ EPSILON = 1e-6
 @click.option(
     "--vae",
     type=click.Choice(["original", "light"]),
-    default="original",
+    default="light",
     help="VAE model to use for depth completion. "
     "original - The original VAE model from Marigold (e.g. Stable Diffusion VAE). "
     f"light - A lightweight VAE model from {VAE_CKPT_LIGHT}.",
