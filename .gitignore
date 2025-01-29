@@ -9,7 +9,7 @@
 *.txt
 *.log
 *.csv
-*.b2
+*.bl2
 
 # Directories
 .vscode/

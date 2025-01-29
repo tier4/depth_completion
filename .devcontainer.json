@@ -33,6 +33,7 @@
           "**/__pycache__",
           "**/site-packages"
         ],
+        "python.analysis.autoImportCompletions": true,
         "editor.formatOnSave": true,
         "editor.codeActionsOnSave": {
           "source.fixAll.ruff": "explicit",

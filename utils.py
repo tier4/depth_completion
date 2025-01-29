@@ -1,7 +1,8 @@
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+import blosc2
 import click
 import cv2
 import imagesize
@@ -18,6 +19,71 @@ CAMERA_CATEGORIES = [
     "CAM_BACK_WIDE",
     "CAM_BACK_NARROW",
 ]
+
+
+def load_array(path: Path) -> np.ndarray:
+    """Load a numpy array from disk.
+
+    Args:
+        path (Path): Path to the numpy array file. Supports .npy (uncompressed numpy),
+            .npz (numpy compressed), and .bl2 (blosc2 compressed) formats.
+
+    Returns:
+        np.ndarray: The loaded numpy array
+
+    Examples:
+        >>> arr = load_array(Path("array.npy"))  # Load uncompressed array
+        >>> arr = load_array(Path("array.npz"))  # Load npz compressed array
+        >>> arr = load_array(Path("array.bl2"))   # Load blosc2 compressed array
+    """  # noqa: E501
+    if path.suffix == ".bl2":
+        return blosc2.load_array(str(path))
+    elif path.suffix == ".npz":
+        return np.load(path)["arr_0"]
+    else:
+        return np.load(path)
+
+
+def save_array(
+    x: np.ndarray,
+    path: Path,
+    compress: Literal["npz", "bl2"] | None = None,
+) -> None:
+    """Save a numpy array to disk with optional compression.
+
+    Args:
+        x (np.ndarray): The numpy array to save
+        path (Path): Path where the array should be saved
+        compress (Literal["npz", "bl2"] | None, optional): The compression format to use.
+            "npz" uses numpy's compressed format, "bl2" uses blosc2 compression.
+            If None, saves uncompressed. Defaults to None.
+
+    Raises:
+        ValueError: If the file extension doesn't match the compression format:
+            - .npy for uncompressed
+            - .npz for npz compression
+            - .bl2 for blosc2 compression
+
+    Examples:
+        >>> arr = np.random.rand(100, 100)
+        >>> save_array(arr, Path("array.npy"))  # Save uncompressed
+        >>> save_array(arr, Path("array.npz"), compress="npz")  # Save with npz compression
+        >>> save_array(arr, Path("array.bl2"), compress="bl2")  # Save with blosc2 compression
+    """  # noqa: E501
+    # Check extension of given path
+    if compress is None and path.suffix != ".npy":
+        raise ValueError(f"Invalid extension: {path.suffix} (must be .npy)")
+    elif compress == "npz" and path.suffix != ".npz":
+        raise ValueError(f"Invalid extension: {path.suffix} (must be .npz)")
+    elif compress == "bl2" and path.suffix != ".bl2":
+        raise ValueError(f"Invalid extension: {path.suffix} (must be .bl2)")
+    # Compress if requested
+    if compress == "npz":
+        np.savez_compressed(path, x)
+    elif compress == "bl2":
+        blosc2.save_array(x, str(path), mode="w")
+    else:
+        np.save(path, x)
 
 
 def infer_camera_category(img_path: Path) -> str | None:
