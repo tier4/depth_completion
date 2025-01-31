@@ -168,6 +168,11 @@ def main(
         out_dir.mkdir(parents=True)
         logger.info(f"Created output directory at {out_dir}")
 
+    # Load ego vehicle mask
+    ego_vehicle_mask, is_valid = load_img(Path("CAM_FRONT_WIDE.png"))
+    ego_vehicle_mask = np.array(ego_vehicle_mask)
+    ego_vehicle_mask = ego_vehicle_mask[..., 3] != 0
+
     # Initialize pipeline
     # NOTE: Do not use float16 as it will make nans in predictions
     torch_dtype = torch.bfloat16 if dtype == "bf16" else torch.float32
@@ -212,6 +217,11 @@ def main(
 
         # Convert depth image to depth map
         depth_map = to_depth_map(depth_img, max_distance=max_distance)
+        print(camera_category)
+        if camera_category == "CAM_FRONT_WIDE":
+            assert depth_map.shape == ego_vehicle_mask.shape
+            print(depth_map[(depth_map > EPSILON) & ego_vehicle_mask])
+            depth_map[ego_vehicle_mask] = 1
         depth_mask = depth_map > EPSILON
 
         # Run inference
