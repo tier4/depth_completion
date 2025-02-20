@@ -86,7 +86,9 @@ EPSILON = 1e-6
 )
 @click.option(
     "--log-level",
-    type=click.Choice(["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"]),
+    type=click.Choice(
+        ["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"]
+    ),
     default="INFO",
     help="Minimum log level to output.",
     show_default=True,
@@ -118,7 +120,9 @@ def main(
     output_size: list[int] | None,
     vis: bool,
     log: Path | None,
-    log_level: Literal["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"],
+    log_level: Literal[
+        "TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"
+    ],
     dtype: Literal["bf16", "fp32"],
     compress: Literal["npz", "bl2", "none"],
 ) -> None:
@@ -159,7 +163,10 @@ def main(
         depth_path_candidates = list(
             filter(
                 lambda p: p.exists(),
-                [depth_dir / path.relative_to(img_dir).with_suffix(ext) for ext in NPARRAY_EXTS],
+                [
+                    depth_dir / path.relative_to(img_dir).with_suffix(ext)
+                    for ext in NPARRAY_EXTS
+                ],
             )
         )
         if len(depth_path_candidates) == 0:
@@ -188,15 +195,21 @@ def main(
     ).to("cuda")
     if vae == "light":
         del pipe.vae
-        pipe.vae = AutoencoderTiny.from_pretrained(VAE_CKPT_LIGHT, torch_dtype=torch_dtype).to(
-            "cuda"
-        )
-    pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
+        pipe.vae = AutoencoderTiny.from_pretrained(
+            VAE_CKPT_LIGHT, torch_dtype=torch_dtype
+        ).to("cuda")
+    pipe.scheduler = DDIMScheduler.from_config(
+        pipe.scheduler.config, timestep_spacing="trailing"
+    )
     logger.info(f"Initialized inference pipeline (dtype={dtype}, vae={vae})")
 
     # Evaluation loop
-    for i, (img_path, depth_path) in enumerate(zip(img_paths, depth_paths, strict=True)):
-        logger.info(f"[{i+1:,} / {len(img_paths):,}] " f"Processing {img_path} and {depth_path}")
+    for i, (img_path, depth_path) in enumerate(
+        zip(img_paths, depth_paths, strict=True)
+    ):
+        logger.info(
+            f"[{i+1:,} / {len(img_paths):,}] " f"Processing {img_path} and {depth_path}"
+        )
 
         # Load camera image
         img, is_valid = utils.load_img(img_path, "RGB")
@@ -241,7 +254,9 @@ def main(
             depth_pred_path = save_dir / img_path.with_suffix(".npy").name
 
         utils.save_array(
-            depth_pred, depth_pred_path, compress=compress if compress != "none" else None
+            depth_pred,
+            depth_pred_path,
+            compress=compress if compress != "none" else None,
         )
         logger.info(f"Saved predicted depth map at {depth_pred_path}")
 
@@ -259,12 +274,19 @@ def main(
             visualized = Image.fromarray(
                 utils.make_grid(
                     np.stack(
-                        [np.asarray(im) for im in [img, depth_visualized, depth_pred_visualized]],
+                        [
+                            np.asarray(im)
+                            for im in [img, depth_visualized, depth_pred_visualized]
+                        ],
                         axis=0,
                     ),
                     rows=1,
                     cols=3,
-                    resize=((output_size[0], output_size[1]) if output_size is not None else None),
+                    resize=(
+                        (output_size[0], output_size[1])
+                        if output_size is not None
+                        else None
+                    ),
                     # NOTE: Resize depth map with nearest neighbor interpolation
                     interpolation=[
                         cv2.INTER_LINEAR,
@@ -276,7 +298,9 @@ def main(
             save_dir = (out_dir / "vis" / img_path.relative_to(img_dir)).parent
             if not save_dir.exists():
                 save_dir.mkdir(parents=True)
-                logger.info(f"Created directory for saving visualization outputs at {save_dir}")
+                logger.info(
+                    f"Created directory for saving visualization outputs at {save_dir}"
+                )
             visualized_path = save_dir / f"{img_path.stem}_vis.jpg"
             visualized.save(visualized_path)
             logger.info(f"Saved visualized outputs at {visualized_path}")

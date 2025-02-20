@@ -14,8 +14,8 @@ def cli() -> None:
 
 
 @cli.command(help="Convert depth images to depth arrays.")
+@click.argument("data_format", type=click.Choice(["comlops"]), default="comlops")
 @click.argument("depth_img_dir", type=click.Path(exists=True, path_type=Path))
-@click.argument("format", type=click.Choice(["comlops"]), default="comlops")
 @click.argument("out_dir", type=click.Path(path_type=Path))
 @click.option(
     "--log",
@@ -26,7 +26,9 @@ def cli() -> None:
 )
 @click.option(
     "--log-level",
-    type=click.Choice(["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"]),
+    type=click.Choice(
+        ["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"]
+    ),
     default="INFO",
     help="Minimum log level to output.",
     show_default=True,
@@ -40,11 +42,13 @@ def cli() -> None:
     show_default=True,
 )
 def depth_img2array(
+    data_format: Literal["comlops"],
     depth_img_dir: Path,
-    format: Literal["comlops"],
     out_dir: Path,
     log: Path,
-    log_level: Literal["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"],
+    log_level: Literal[
+        "TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"
+    ],
     compress: Literal["npz", "bl2", "none"],
 ) -> None:
     # Set log level
@@ -72,7 +76,7 @@ def depth_img2array(
         logger.info(f"Created output root directory at {out_dir}")
 
     # Set max distance
-    if format == "comlops":
+    if data_format == "comlops":
         max_distance = 120.0
     else:
         logger.critical("Invalid format: {format}")
@@ -83,7 +87,9 @@ def depth_img2array(
         # Load depth image
         depth_img, is_valid = utils.load_img(depth_img_path, "RGB")
         if not is_valid:
-            logger.warning(f"Empty input depth image found: {depth_img_path} (skipping)")
+            logger.warning(
+                f"Empty input depth image found: {depth_img_path} (skipping)"
+            )
             continue
 
         # Convert depth image to depth array
@@ -99,8 +105,12 @@ def depth_img2array(
             save_path = save_path.with_suffix(f".{compress}")
         else:
             save_path = save_path.with_suffix(".npy")
-        utils.save_array(depth_array, save_path, compress=compress if compress != "none" else None)
-        logger.info(f"[{idx+1:,}/{len(depth_img_paths):,}] Saved depth array at {save_path}")
+        utils.save_array(
+            depth_array, save_path, compress=compress if compress != "none" else None
+        )
+        logger.info(
+            f"[{idx+1:,}/{len(depth_img_paths):,}] Saved depth array at {save_path}"
+        )
     logger.success(f"Finished converting {len(depth_img_paths):,} depth images")
 
 
