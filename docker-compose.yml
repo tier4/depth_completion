@@ -13,8 +13,12 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    command: /bin/bash -c "while sleep 1000; do :; done"
+    command: tail -f /dev/null
     volumes:
+      - type: bind
+        source: ~/.vimrc
+        target: /home/user/.vimrc
+        consistency: delegated
       - type: bind
         source: ~/.ssh
         target: /home/user/.ssh

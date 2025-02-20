@@ -33,7 +33,20 @@
           "**/__pycache__",
           "**/site-packages"
         ],
-        "python.analysis.autoImportCompletions": true,
+        // NOTE: Tips for lightweight pylice configuration
+        // https://github.com/microsoft/pylance-release/wiki/Pylance-Configuration-Tips
+        // Inlay Hints
+        "python.analysis.inlayHints.callArgumentNames": "off",
+        // Diagnostics
+        "python.analysis.diagnosticMode": "openFilesOnly",
+        // Indexing
+        "python.analysis.indexing": false,
+        // Auto Indent
+        "python.analysis.autoIndent": true,
+        // Type Checking
+        "python.analysis.typeCheckingMode": "off",
+        // Auto import
+        "python.analysis.autoImportCompletions": false,
         "editor.formatOnSave": true,
         "editor.codeActionsOnSave": {
           "source.fixAll.ruff": "explicit",

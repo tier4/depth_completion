@@ -1,9 +1,9 @@
 [tool.black]
 target-version = ["py311"]
-line-length = 100
+line-length = 88
 
 [tool.ruff]
-line-length = 100
+line-length = 88
 target-version = "py311"
 indent-width = 4
 
@@ -21,16 +21,13 @@ select = [
     "F",
     # flake8-bugbear
     "B",
-    # flake8-simplify
-    "SIM",
+    # flake8-annotations
+    "A",
     # isort
     "I",
-    # pyupgrade
-    "UP",
-    # perflint
-    "PERF",
 ]
 ignore = [
+    "F401", # unused-import
     "E741", # anbiguous-variable-name
 ]
 
@@ -55,3 +52,4 @@ exclude = [
     "**/site-packages",
 ]
 typeCheckingMode = "off"
+reportPrivateImportUsage = "none"
