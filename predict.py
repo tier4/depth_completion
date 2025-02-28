@@ -116,6 +116,13 @@ EPSILON = 1e-6
     help="Specify the compression format for the output depth maps. If none, saves uncompressed.",
     show_default=True,
 )
+@click.option(
+    "--postprocess",
+    type=bool,
+    default=True,
+    help="Whether to postprocess the predicted depth maps.",
+    show_default=True,
+)
 def main(
     img_dir: Path,
     depth_dir: Path,
@@ -133,6 +140,7 @@ def main(
     ],
     dtype: Literal["bf16", "fp32"],
     compress: Literal["npz", "bl2", "none"],
+    postprocess: bool,
 ) -> None:
     # Set log level
     logger.remove()
@@ -161,6 +169,11 @@ def main(
                 seg_meta_path,
                 columns={"id": int, "name": str, "r": int, "g": int, "b": int},
             )
+            try:
+                seg_sky_id = seg_meta["id"][seg_meta["name"].index("sky")]
+            except ValueError:
+                logger.warning("Sky class not found in segmentation map")
+                seg_sky_id = None
 
     # Get paths of input images
     img_paths_all = utils.get_img_paths(img_dir)
@@ -248,7 +261,8 @@ def main(
         # Load depth map
         depth = utils.load_array(depth_path)
 
-        # Add hints to depth map
+        # Load segmentation map
+        seg = None
         if seg_dir is not None:
             seg = utils.load_array(seg_paths[i])
             if seg.shape != depth.shape:
@@ -257,14 +271,13 @@ def main(
                     f"depth map shape {depth.shape}. "
                     f"Segmentation map will be ignored."
                 )
-            else:
-                # Set sky pixels to max distance
-                try:
-                    sky_id = seg_meta["id"][seg_meta["name"].index("sky")]
-                    depth[(seg == sky_id) & (depth <= EPSILON)] = max_distance
-                except ValueError:
-                    # NOTE: class "sky" not found in segmentation map
-                    pass
+                seg = None
+
+        # Add segmentation hints to depth map
+        if seg is not None:
+            # Set sky pixels to max distance
+            if seg_sky_id is not None:
+                depth[(seg == seg_sky_id) & (depth <= EPSILON)] = max_distance
 
         # Run inference
         start_time = time.time()
@@ -279,6 +292,11 @@ def main(
         if utils.has_nan(depth_pred):
             logger.warning("NaN values found in depth map prediction (skipping)")
             continue
+
+        # Postprocess
+        if postprocess:
+            if seg_sky_id is not None:
+                depth_pred[seg == seg_sky_id] = max_distance
 
         # Save predicted depth map
         save_dir = (out_dir / "depth" / img_path.relative_to(img_dir)).parent
