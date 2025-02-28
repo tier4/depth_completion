@@ -1,3 +1,4 @@
+import shutil
 import sys
 from pathlib import Path
 from typing import Literal
@@ -78,7 +79,8 @@ def seg_img2array(
     if not out_dir.exists():
         out_dir.mkdir(parents=True)
         logger.info(f"Created output root directory at {out_dir}")
-
+        # Copy map.csv to output root directory
+        shutil.copy(seg_map_path, out_dir / "map.csv")
     # Conversion loop
     for i, seg_img_path in enumerate(seg_img_paths):
         logger.info(f"[{i+1:,}/{len(seg_img_paths):,}] - Converting {seg_img_path}")
