@@ -1,3 +1,4 @@
+import csv
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
@@ -19,6 +20,62 @@ CAMERA_CATEGORIES = [
     "CAM_BACK_WIDE",
     "CAM_BACK_NARROW",
 ]
+
+
+def load_csv(path: Path, columns: dict[str, type]) -> dict[str, list[Any]]:
+    """Load a CSV file from disk with column selection and type conversion.
+
+    Args:
+        path (Path): Path to the CSV file.
+        columns (dict[str, type]): Dictionary mapping column names
+            to their desired types.
+
+    Returns:
+        dict[str, list[Any]]: A dictionary mapping column names to lists of values.
+
+    Raises:
+        ValueError: If any of the required columns are missing from the CSV file.
+
+    Examples:
+        >>> # Get specific columns with type conversion
+        >>> data = load_csv(
+        ...     Path("data.csv"),
+        ...     columns={"id": int, "value": float, "name": str}
+        ... )
+        >>> ids = data["id"]  # List of integers
+        >>> values = data["value"]  # List of floats
+    """  # noqa: E501
+
+    with open(path, "r", newline="") as csvfile:
+        reader = csv.reader(csvfile)
+        data = list(reader)
+
+        header = data[0]
+        rows = data[1:]
+
+        # Check if all required columns exist in the CSV
+        missing_columns = [col for col in columns if col not in header]
+        if missing_columns:
+            missing_cols_str = ", ".join(missing_columns)
+            raise ValueError(
+                f"Missing required columns in CSV file: {missing_cols_str}"
+            )
+
+        # Create a mapping from column name to index
+        col_indices = {col: header.index(col) for col in columns}
+
+        # Initialize result dictionary
+        result: dict[str, list[Any]] = {col: [] for col in columns}
+
+        # Extract and convert values
+        for row in rows:
+            for col, idx in col_indices.items():
+                if idx < len(row):
+                    value = row[idx]
+                    value = columns[col](value)  # Data type conversion
+                    result[col].append(value)
+
+        return result
 
 
 def load_array(path: Path) -> np.ndarray:
@@ -328,7 +385,11 @@ def make_grid(
     if resize is not None:
         th, tw = resize
         if th != -1 or tw != -1:
-            methods = interpolation if isinstance(interpolation, Sequence) else [interpolation] * n
+            methods = (
+                interpolation
+                if isinstance(interpolation, Sequence)
+                else [interpolation] * n
+            )
             target_h = th if th != -1 else int(tw * grid_h / grid_w)
             target_w = tw if tw != -1 else int(th * grid_w / grid_h)
             # Calculate individual image size based on grid target size
