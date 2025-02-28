@@ -1,7 +1,7 @@
 import sys
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import click
 import cv2
@@ -30,6 +30,13 @@ EPSILON = 1e-6
     type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
 )
 @click.argument("out_dir", type=click.Path(exists=False, path_type=Path))
+@click.option(
+    "--seg-dir",
+    type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
+    default=None,
+    help="Path to directory containing segmentation maps to use for depth completion.",
+    show_default=True,
+)
 @click.option(
     "--vae",
     type=click.Choice(["original", "light"]),
@@ -113,6 +120,7 @@ def main(
     img_dir: Path,
     depth_dir: Path,
     out_dir: Path,
+    seg_dir: Path | None,
     vae: Literal["original", "light"],
     steps: int,
     res: int,
@@ -142,15 +150,29 @@ def main(
         logger.critical("CUDA must be available to run this script.")
         sys.exit(1)
 
+    # Load segmentation mapping data (if provided)
+    if seg_dir is not None:
+        seg_meta_path = seg_dir / "map.csv"
+        if not seg_meta_path.exists():
+            logger.error(f"Segmentation mapping file not found at {seg_meta_path}")
+            seg_dir = None
+        else:
+            seg_meta = utils.load_csv(
+                seg_meta_path,
+                columns={"id": int, "name": str, "r": int, "g": int, "b": int},
+            )
+
     # Get paths of input images
     img_paths_all = utils.get_img_paths(img_dir)
 
     # Sort input image paths by filename
     img_paths_all.sort(key=lambda x: x.name)
 
-    # Get paths of input depth images
+    # Get paths of input depth images and optionally segmentation maps
     depth_paths: list[Path] = []
     img_paths: list[Path] = []
+    if seg_dir is not None:
+        seg_paths: list[Path] = []
     for path in img_paths_all:
         # NOTE:
         # Get corresponding depth file path by checking each supported extension
@@ -172,11 +194,17 @@ def main(
         if len(depth_path_candidates) == 0:
             logger.warning(f"No depth map found for {path} (skipping)")
             continue
+        if seg_dir is not None:
+            seg_path = seg_dir / path.relative_to(img_dir).with_suffix(".npy")
+            if not seg_path.exists():
+                logger.warning(f"No segmentation map found for {path} (skipping)")
+                continue
         depth_paths.append(depth_path_candidates[0])
         img_paths.append(path)
-    assert len(depth_paths) == len(img_paths)
+        if seg_dir is not None:
+            seg_paths.append(seg_path)
     if len(img_paths) == 0:
-        logger.critical("No valid image-depth pairs found")
+        logger.critical("No valid input pairs found")
         sys.exit(1)
     logger.info(f"Found {len(depth_paths):,} input image-depth pairs")
 
@@ -219,15 +247,24 @@ def main(
 
         # Load depth map
         depth = utils.load_array(depth_path)
-        depth_mask = depth > EPSILON
 
-        # Infer camera category
-        camera_category = utils.infer_camera_category(img_path)
-        if camera_category is None:
-            logger.warning(
-                f"Could not infer camera category of this image file: {img_path} (skipping)"
-            )
-            continue
+        # Add hints to depth map
+        if seg_dir is not None:
+            seg = utils.load_array(seg_paths[i])
+            if seg.shape != depth.shape:
+                logger.warning(
+                    f"Segmentation map shape {seg.shape} does not match "
+                    f"depth map shape {depth.shape}. "
+                    f"Segmentation map will be ignored."
+                )
+            else:
+                # Set sky pixels to max distance
+                try:
+                    sky_id = seg_meta["id"][seg_meta["name"].index("sky")]
+                    depth[(seg == sky_id) & (depth <= EPSILON)] = max_distance
+                except ValueError:
+                    # NOTE: class "sky" not found in segmentation map
+                    pass
 
         # Run inference
         start_time = time.time()
@@ -266,7 +303,7 @@ def main(
                 depth, val_min=0, val_max=max_distance
             )[0]
             depth_visualized = np.array(depth_visualized)
-            depth_visualized[~depth_mask] = 0
+            depth_visualized[depth <= EPSILON] = 0
             depth_visualized = Image.fromarray(depth_visualized)
             depth_pred_visualized = pipe.image_processor.visualize_depth(
                 depth_pred, val_min=0, val_max=max_distance
