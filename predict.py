@@ -172,8 +172,15 @@ def main(
             try:
                 seg_sky_id = seg_meta["id"][seg_meta["name"].index("sky")]
             except ValueError:
-                logger.warning("Sky class not found in segmentation map")
+                logger.warning("class=sky not found in segmentation map")
                 seg_sky_id = None
+            try:
+                seg_ego_vehicle_id = seg_meta["id"][
+                    seg_meta["name"].index("ego_vehicle")
+                ]
+            except ValueError:
+                logger.warning("class=ego_vehicle not found in segmentation map")
+                seg_ego_vehicle_id = None
 
     # Get paths of input images
     img_paths_all = utils.get_img_paths(img_dir)
@@ -295,8 +302,9 @@ def main(
 
         # Postprocess
         if postprocess:
-            if seg_sky_id is not None:
-                depth_pred[seg == seg_sky_id] = max_distance
+            if seg_dir is not None:
+                if seg_sky_id is not None:
+                    depth_pred[seg == seg_sky_id] = max_distance
 
         # Save predicted depth map
         save_dir = (out_dir / "depth" / img_path.relative_to(img_dir)).parent
