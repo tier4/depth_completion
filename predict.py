@@ -16,6 +16,7 @@ from marigold_dc import MarigoldDepthCompletionPipeline
 
 NPARRAY_EXTS = [".bl2", ".npz", ".npy"]
 MARIGOLD_CKPT_ORIGINAL = "prs-eth/marigold-v1-0"
+MARIGOLD_CKPT_LCM = "prs-eth/marigold-lcm-v1-0"
 VAE_CKPT_LIGHT = "madebyollin/taesd"
 EPSILON = 1e-6
 
@@ -38,9 +39,18 @@ EPSILON = 1e-6
     show_default=True,
 )
 @click.option(
+    "--marigold",
+    type=click.Choice(["original", "lcm"]),
+    default="original",
+    help="Marigold model to use for depth completion. "
+    "original - The original Marigold model. "
+    "lcm - The LCM-based Marigold model.",
+    show_default=True,
+)
+@click.option(
     "--vae",
     type=click.Choice(["original", "light"]),
-    default="light",
+    default="original",
     help="VAE model to use for depth completion. "
     "original - The original VAE model from Marigold (e.g. Stable Diffusion VAE). "
     f"light - A lightweight VAE model from {VAE_CKPT_LIGHT}.",
@@ -103,8 +113,8 @@ EPSILON = 1e-6
 @click.option(
     "-dt",
     "--dtype",
-    type=click.Choice(["bf16", "fp32"]),
-    default="bf16",
+    type=click.Choice(["fp16", "bf16", "fp32"]),
+    default="fp32",
     help="Data type for inference.",
     show_default=True,
 )
@@ -113,7 +123,8 @@ EPSILON = 1e-6
     "--compress",
     type=click.Choice(["npz", "bl2", "none"]),
     default="bl2",
-    help="Specify the compression format for the output depth maps. If none, saves uncompressed.",
+    help="Specify the compression format for the output depth maps. "
+    "If none, saves uncompressed.",
     show_default=True,
 )
 @click.option(
@@ -128,6 +139,7 @@ def main(
     depth_dir: Path,
     out_dir: Path,
     seg_dir: Path | None,
+    marigold: Literal["original", "lcm"],
     vae: Literal["original", "light"],
     steps: int,
     res: int,
@@ -150,7 +162,7 @@ def main(
     if log is not None:
         if not log.parent.exists():
             log.parent.mkdir(parents=True)
-        logger.add(log, rotation="10 MB", level=log_level)
+        logger.add(log, rotation="100 MB", level=log_level)
         logger.info(f"Saving logs to {log}")
 
     # Check if CUDA is available
@@ -174,13 +186,6 @@ def main(
             except ValueError:
                 logger.warning("class=sky not found in segmentation map")
                 seg_sky_id = None
-            try:
-                seg_ego_vehicle_id = seg_meta["id"][
-                    seg_meta["name"].index("ego_vehicle")
-                ]
-            except ValueError:
-                logger.warning("class=ego_vehicle not found in segmentation map")
-                seg_ego_vehicle_id = None
 
     # Get paths of input images
     img_paths_all = utils.get_img_paths(img_dir)
@@ -191,17 +196,8 @@ def main(
     # Get paths of input depth images and optionally segmentation maps
     depth_paths: list[Path] = []
     img_paths: list[Path] = []
-    if seg_dir is not None:
-        seg_paths: list[Path] = []
+    seg_paths: list[Path] = []
     for path in img_paths_all:
-        # NOTE:
-        # Get corresponding depth file path by checking each supported extension
-        # NPARRAY_EXTS contains [".bl2", ".npz", ".npy"]
-        # Constructs paths by:
-        # 1. Getting relative path from img_dir
-        # 2. Changing extension to each supported type
-        # 3. Joining with depth_dir
-        # Then filters to find first existing path
         depth_path_candidates = list(
             filter(
                 lambda p: p.exists(),
@@ -224,9 +220,9 @@ def main(
         if seg_dir is not None:
             seg_paths.append(seg_path)
     if len(img_paths) == 0:
-        logger.critical("No valid input pairs found")
+        logger.error("No valid input pairs found")
         sys.exit(1)
-    logger.info(f"Found {len(depth_paths):,} input image-depth pairs")
+    logger.info(f"Found {len(depth_paths):,} input pairs")
 
     # Create output directory if it doesn't exist
     if not out_dir.exists():
@@ -236,8 +232,12 @@ def main(
     # Initialize pipeline
     # NOTE: Do not use float16 as it will make nans in predictions
     torch_dtype = torch.bfloat16 if dtype == "bf16" else torch.float32
+    if marigold == "original":
+        marigold_ckpt = MARIGOLD_CKPT_ORIGINAL
+    else:  # marigold == "lcm"
+        marigold_ckpt = MARIGOLD_CKPT_LCM
     pipe = MarigoldDepthCompletionPipeline.from_pretrained(
-        MARIGOLD_CKPT_ORIGINAL,
+        marigold_ckpt,
         prediction_type="depth",
         torch_dtype=torch_dtype,
     ).to("cuda")
@@ -269,7 +269,7 @@ def main(
         depth = utils.load_array(depth_path)
 
         # Load segmentation map
-        seg = None
+        seg: np.ndarray | None = None
         if seg_dir is not None:
             seg = utils.load_array(seg_paths[i])
             if seg.shape != depth.shape:
@@ -295,9 +295,9 @@ def main(
             processing_resolution=res,
         )
         duration_pred = time.time() - start_time
-        logger.debug(f"Predicted depth map in {duration_pred:.2f} seconds")
+        logger.info(f"Inference time: {duration_pred:.2f} seconds")
         if utils.has_nan(depth_pred):
-            logger.warning("NaN values found in depth map prediction (skipping)")
+            logger.error("NaN values found in inferenced depth map (skipping)")
             continue
 
         # Postprocess
@@ -306,7 +306,7 @@ def main(
                 if seg_sky_id is not None:
                     depth_pred[seg == seg_sky_id] = max_distance
 
-        # Save predicted depth map
+        # Save inferenced depth map
         save_dir = (out_dir / "depth" / img_path.relative_to(img_dir)).parent
         if not save_dir.exists():
             save_dir.mkdir(parents=True)
@@ -315,15 +315,14 @@ def main(
             depth_pred_path = save_dir / img_path.with_suffix(f".{compress}").name
         else:
             depth_pred_path = save_dir / img_path.with_suffix(".npy").name
-
         utils.save_array(
             depth_pred,
             depth_pred_path,
             compress=compress if compress != "none" else None,
         )
-        logger.info(f"Saved predicted depth map at {depth_pred_path}")
+        logger.info(f"Saved inferenced depth map at {depth_pred_path}")
 
-        # Save visualization of predicted depth map
+        # Save visualization of inferenced depth map
         if vis:
             depth_visualized = pipe.image_processor.visualize_depth(
                 depth, val_min=0, val_max=max_distance
@@ -367,7 +366,7 @@ def main(
             visualized_path = save_dir / f"{img_path.stem}_vis.jpg"
             visualized.save(visualized_path)
             logger.info(f"Saved visualized outputs at {visualized_path}")
-    logger.success(f"Finished processing {len(img_paths):,} image-depth pairs")
+    logger.success(f"Finished processing {len(img_paths):,} input pairs")
 
 
 if __name__ == "__main__":

@@ -19,7 +19,6 @@
 import argparse
 import logging
 import os
-import warnings
 
 import diffusers
 import numpy as np
@@ -27,7 +26,6 @@ import torch
 from diffusers import DDIMScheduler, MarigoldDepthPipeline
 from PIL import Image
 
-warnings.simplefilter(action="ignore", category=FutureWarning)
 diffusers.utils.logging.disable_progress_bar()
 
 
@@ -73,9 +71,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         generator = torch.Generator(device=device).manual_seed(seed)
 
         # Check inputs.
-        if num_inference_steps is None:
-            raise ValueError("Invalid num_inference_steps")
-        if type(sparse_depth) is not np.ndarray or sparse_depth.ndim != 2:
+        if sparse_depth.ndim != 2:
             raise ValueError(
                 "Sparse depth should be a 2D numpy "
                 "ndarray with zeros at missing positions"
@@ -97,26 +93,18 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 ]  # [1,2,1024]
 
         # Preprocess input images
-        image, padding, original_resolution = self.image_processor.preprocess(
+        image_tensor, padding, original_resolution = self.image_processor.preprocess(
             image,
             processing_resolution=processing_resolution,
             device=device,
             dtype=self.dtype,
         )  # [N,3,PPH,PPW]
 
-        # Check sparse depth dimensions
-        if sparse_depth.shape != original_resolution:
-            raise ValueError(
-                f"Sparse depth dimensions ({sparse_depth.shape}) "
-                f"must match that of the image ({image.shape[-2:]})"
-            )
-
         # Encode input image into latent space
         with torch.no_grad():
             image_latent, pred_latent = self.prepare_latents(
-                image, None, generator, 1, 1
+                image_tensor, None, generator, 1, 1
             )  # [N*E,4,h,w], [N*E,4,h,w]
-        del image
 
         # Preprocess sparse depth
         sparse_depth = torch.from_numpy(sparse_depth)[None, None].float().to(device)
