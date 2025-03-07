@@ -20,6 +20,8 @@ MARIGOLD_CKPT_LCM = "prs-eth/marigold-lcm-v1-0"
 VAE_CKPT_LIGHT = "madebyollin/taesd"
 EPSILON = 1e-6
 
+torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
+
 
 @click.command(
     help="Predict dense depth maps from sparse depth maps and camera images."
@@ -139,6 +141,13 @@ EPSILON = 1e-6
     show_default=True,
 )
 @click.option(
+    "--compile",
+    type=bool,
+    default=True,
+    help="Whether to compile the inference pipeline using torch.compile.",
+    show_default=True,
+)
+@click.option(
     "--postprocess",
     type=bool,
     default=True,
@@ -165,6 +174,7 @@ def main(
     dtype: Literal["bf16", "fp32"],
     compress: Literal["npz", "bl2", "none"],
     postprocess: bool,
+    compile: bool,
 ) -> None:
     # Set log level
     logger.remove()
@@ -254,13 +264,15 @@ def main(
         torch_dtype=torch_dtype,
     ).to("cuda")
     if vae == "light":
-        del pipe.vae
         pipe.vae = AutoencoderTiny.from_pretrained(
             VAE_CKPT_LIGHT, torch_dtype=torch_dtype
         ).to("cuda")
     pipe.scheduler = DDIMScheduler.from_config(
         pipe.scheduler.config, timestep_spacing="trailing"
     )
+    if compile:
+        pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead", fullgraph=True)
+        pipe.vae = torch.compile(pipe.vae, mode="reduce-overhead", fullgraph=True)
     logger.info(f"Initialized inference pipeline (dtype={dtype}, vae={vae})")
 
     # Evaluation loop
