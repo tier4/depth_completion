@@ -99,7 +99,7 @@ EPSILON = 1e-6
 @click.option(
     "--save-depth-map",
     type=bool,
-    default=False,
+    default=True,
     help="Whether to save the inferenced depth maps. "
     "Output format can be specified with --compress.",
     show_default=True,
