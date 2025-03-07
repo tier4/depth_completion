@@ -1,7 +1,7 @@
 import sys
 import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 import click
 import cv2
@@ -21,7 +21,9 @@ VAE_CKPT_LIGHT = "madebyollin/taesd"
 EPSILON = 1e-6
 
 
-@click.command()
+@click.command(
+    help="Predict dense depth maps from sparse depth maps and camera images."
+)
 @click.argument(
     "img_dir",
     type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
@@ -95,6 +97,14 @@ EPSILON = 1e-6
     help="Whether to save visualization of output depth maps.",
 )
 @click.option(
+    "--save-depth-map",
+    type=bool,
+    default=False,
+    help="Whether to save the inferenced depth maps. "
+    "Output format can be specified with --compress.",
+    show_default=True,
+)
+@click.option(
     "--log",
     type=click.Path(path_type=Path),
     default=None,
@@ -115,7 +125,7 @@ EPSILON = 1e-6
     "--dtype",
     type=click.Choice(["fp16", "bf16", "fp32"]),
     default="fp32",
-    help="Data type for inference.",
+    help="Data precision for inference.",
     show_default=True,
 )
 @click.option(
@@ -124,7 +134,8 @@ EPSILON = 1e-6
     type=click.Choice(["npz", "bl2", "none"]),
     default="bl2",
     help="Specify the compression format for the output depth maps. "
-    "If none, saves uncompressed.",
+    "If none, saves uncompressed. "
+    "This option is ignored if --save-depth-map=False",
     show_default=True,
 )
 @click.option(
@@ -145,6 +156,7 @@ def main(
     res: int,
     max_distance: float,
     output_size: list[int] | None,
+    save_depth_map: bool,
     vis: bool,
     log: Path | None,
     log_level: Literal[
@@ -307,20 +319,23 @@ def main(
                     depth_pred[seg == seg_sky_id] = max_distance
 
         # Save inferenced depth map
-        save_dir = (out_dir / "depth" / img_path.relative_to(img_dir)).parent
-        if not save_dir.exists():
-            save_dir.mkdir(parents=True)
-            logger.info(f"Created output directory for saving depth maps at {save_dir}")
-        if compress != "none":
-            depth_pred_path = save_dir / img_path.with_suffix(f".{compress}").name
-        else:
-            depth_pred_path = save_dir / img_path.with_suffix(".npy").name
-        utils.save_array(
-            depth_pred,
-            depth_pred_path,
-            compress=compress if compress != "none" else None,
-        )
-        logger.info(f"Saved inferenced depth map at {depth_pred_path}")
+        if save_depth_map:
+            save_dir = (out_dir / "depth" / img_path.relative_to(img_dir)).parent
+            if not save_dir.exists():
+                save_dir.mkdir(parents=True)
+                logger.info(
+                    f"Created output directory for saving depth maps at {save_dir}"
+                )
+            if compress != "none":
+                depth_pred_path = save_dir / img_path.with_suffix(f".{compress}").name
+            else:
+                depth_pred_path = save_dir / img_path.with_suffix(".npy").name
+            utils.save_array(
+                depth_pred,
+                depth_pred_path,
+                compress=compress if compress != "none" else None,
+            )
+            logger.info(f"Saved inferenced depth map at {depth_pred_path}")
 
         # Save visualization of inferenced depth map
         if vis:
