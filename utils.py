@@ -10,6 +10,8 @@ import imagesize
 import numpy as np
 from PIL import Image
 
+NPARRAY_EXTENSIONS = [".npy", ".npz", ".bl2"]
+
 CAMERA_CATEGORIES = [
     "CAM_FRONT_WIDE",
     "CAM_FRONT_NARROW",
@@ -86,19 +88,28 @@ def load_array(path: Path) -> np.ndarray:
             .npz (numpy compressed), and .bl2 (blosc2 compressed) formats.
 
     Returns:
-        np.ndarray: The loaded numpy array
+        np.ndarray: The loaded numpy array. For depth maps, this typically contains
+            distance values in meters, with zeros or negative values indicating
+            invalid/missing measurements.
+
+    Raises:
+        ValueError: If the file extension is not one of the supported formats.
 
     Examples:
         >>> arr = load_array(Path("array.npy"))  # Load uncompressed array
         >>> arr = load_array(Path("array.npz"))  # Load npz compressed array
         >>> arr = load_array(Path("array.bl2"))   # Load blosc2 compressed array
+        >>> depth_map = load_array(Path("depth.npy"))  # Load depth map
     """  # noqa: E501
+    if path.suffix not in NPARRAY_EXTENSIONS:
+        raise ValueError(
+            f"Invalid extension: {path.suffix} (must be one of {NPARRAY_EXTENSIONS}"
+        )
     if path.suffix == ".bl2":
         return blosc2.load_array(str(path))
     elif path.suffix == ".npz":
         return np.load(path)["arr_0"]
-    else:
-        return np.load(path)
+    return np.load(path)
 
 
 def save_array(

@@ -28,6 +28,10 @@ from PIL import Image
 
 diffusers.utils.logging.disable_progress_bar()
 
+MARIGOLD_CKPT_ORIGINAL = "prs-eth/marigold-v1-0"
+MARIGOLD_CKPT_LCM = "prs-eth/marigold-lcm-v1-0"
+VAE_CKPT_LIGHT = "madebyollin/taesd"
+
 
 class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
     """

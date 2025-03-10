@@ -12,13 +12,13 @@ from loguru import logger
 from PIL import Image
 
 import utils
-from marigold_dc import MarigoldDepthCompletionPipeline
-
-NPARRAY_EXTS = [".bl2", ".npz", ".npy"]
-MARIGOLD_CKPT_ORIGINAL = "prs-eth/marigold-v1-0"
-MARIGOLD_CKPT_LCM = "prs-eth/marigold-lcm-v1-0"
-VAE_CKPT_LIGHT = "madebyollin/taesd"
-EPSILON = 1e-6
+from marigold_dc import (
+    MARIGOLD_CKPT_LCM,
+    MARIGOLD_CKPT_ORIGINAL,
+    VAE_CKPT_LIGHT,
+    MarigoldDepthCompletionPipeline,
+)
+from utils import NPARRAY_EXTENSIONS
 
 torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 
@@ -225,7 +225,7 @@ def main(
                 lambda p: p.exists(),
                 [
                     depth_dir / path.relative_to(img_dir).with_suffix(ext)
-                    for ext in NPARRAY_EXTS
+                    for ext in NPARRAY_EXTENSIONS
                 ],
             )
         )
@@ -308,7 +308,7 @@ def main(
         if seg is not None:
             # Set sky pixels to max distance
             if seg_sky_id is not None:
-                depth[(seg == seg_sky_id) & (depth <= EPSILON)] = max_distance
+                depth[(seg == seg_sky_id) & (depth <= 0)] = max_distance
 
         # Run inference
         start_time = time.time()
@@ -355,7 +355,7 @@ def main(
                 depth, val_min=0, val_max=max_distance
             )[0]
             depth_visualized = np.array(depth_visualized)
-            depth_visualized[depth <= EPSILON] = 0
+            depth_visualized[depth <= 0] = 0
             depth_visualized = Image.fromarray(depth_visualized)
             depth_pred_visualized = pipe.image_processor.visualize_depth(
                 depth_pred, val_min=0, val_max=max_distance
