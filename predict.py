@@ -141,7 +141,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "--compile",
+    "--use-compile",
     type=bool,
     default=True,
     help="Whether to compile the inference pipeline using torch.compile.",
@@ -174,7 +174,7 @@ def main(
     dtype: Literal["bf16", "fp32"],
     compress: Literal["npz", "bl2", "none"],
     postprocess: bool,
-    compile: bool,
+    use_compile: bool,
 ) -> None:
     # Set log level
     logger.remove()
@@ -270,7 +270,7 @@ def main(
     pipe.scheduler = DDIMScheduler.from_config(
         pipe.scheduler.config, timestep_spacing="trailing"
     )
-    if compile:
+    if use_compile:
         pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead", fullgraph=True)
         pipe.vae = torch.compile(pipe.vae, mode="reduce-overhead", fullgraph=True)
     logger.info(f"Initialized inference pipeline (dtype={dtype}, vae={vae})")
