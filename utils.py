@@ -80,6 +80,18 @@ def load_csv(path: Path, columns: dict[str, type]) -> dict[str, list[Any]]:
         return result
 
 
+def is_array_path(path: Path) -> bool:
+    """Check if a path points to a numpy array file.
+
+    Args:
+        path (Path): Path to check
+
+    Returns:
+        bool: True if path points to a numpy array file, False otherwise
+    """
+    return path.is_file() and path.suffix in NPARRAY_EXTENSIONS
+
+
 def load_array(path: Path) -> np.ndarray:
     """Load a numpy array from disk.
 
@@ -101,7 +113,7 @@ def load_array(path: Path) -> np.ndarray:
         >>> arr = load_array(Path("array.bl2"))   # Load blosc2 compressed array
         >>> depth_map = load_array(Path("depth.npy"))  # Load depth map
     """  # noqa: E501
-    if path.suffix not in NPARRAY_EXTENSIONS:
+    if not is_array_path(path):
         raise ValueError(
             f"Invalid extension: {path.suffix} (must be one of {NPARRAY_EXTENSIONS}"
         )
