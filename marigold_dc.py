@@ -145,13 +145,16 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             affine_invariant_prediction = self.decode_prediction(
                 latent
             )  # [E,1,PPH,PPW]
-            prediction = affine_to_metric(affine_invariant_prediction)
-            prediction = self.image_processor.unpad_image(
-                prediction, padding
+            affine_invariant_prediction = self.image_processor.unpad_image(
+                affine_invariant_prediction, padding
             )  # [E,1,PH,PW]
-            prediction = self.image_processor.resize_antialias(
-                prediction, original_resolution, "bilinear", is_aa=False
-            )  # [1,1,H,W]
+            affine_invariant_prediction = self.image_processor.resize_antialias(
+                affine_invariant_prediction,
+                original_resolution,
+                "bilinear",
+                is_aa=False,
+            )  # [E,1,H,W]
+            prediction = affine_to_metric(affine_invariant_prediction)
             return prediction
 
         def loss_l1l2(input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
