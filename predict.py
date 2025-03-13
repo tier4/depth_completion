@@ -148,6 +148,13 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
+    "--elemwise-scaling",
+    type=bool,
+    default=False,
+    help="Whether to use element-wise scaling for depth completion.",
+    show_default=True,
+)
+@click.option(
     "--postprocess",
     type=bool,
     default=True,
@@ -175,6 +182,7 @@ def main(
     compress: Literal["npz", "bl2", "none"],
     postprocess: bool,
     use_compile: bool,
+    elemwise_scaling: bool,
 ) -> None:
     # Set log level
     logger.remove()
@@ -317,6 +325,7 @@ def main(
             sparse_depth=depth,
             num_inference_steps=steps,
             processing_resolution=res,
+            elemwise_scaling=elemwise_scaling,
         )
         duration_pred = time.time() - start_time
         logger.info(f"Inference time: {duration_pred:.2f} seconds")

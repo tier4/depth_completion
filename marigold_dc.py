@@ -46,6 +46,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         num_inference_steps: int = 50,
         processing_resolution: int = 768,
         seed: int = 2024,
+        elemwise_scaling: bool = False,
     ) -> np.ndarray:
         """
         Args:
@@ -117,9 +118,14 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
         # Set up optimization targets and compute
         # the range and lower bound of the sparse depth
-        scale, shift = torch.nn.Parameter(
-            torch.ones(1, device=device)
-        ), torch.nn.Parameter(torch.ones(1, device=device))
+        if elemwise_scaling:
+            scale, shift = torch.nn.Parameter(
+                torch.ones(original_resolution, device=device)
+            ), torch.nn.Parameter(torch.ones(original_resolution, device=device))
+        else:
+            scale, shift = torch.nn.Parameter(
+                torch.ones(1, device=device)
+            ), torch.nn.Parameter(torch.ones(1, device=device))
         pred_latent = torch.nn.Parameter(pred_latent)
         depth_min = sparse_depth[sparse_mask].min()
         depth_max = sparse_depth[sparse_mask].max()
