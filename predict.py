@@ -84,13 +84,6 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "-os",
-    "--output-size",
-    type=utils.CommaSeparated(int, n=2),
-    default=None,
-    show_default=True,
-)
-@click.option(
     "-v",
     "--vis",
     type=bool,
@@ -171,7 +164,6 @@ def main(
     steps: int,
     res: int,
     max_distance: float,
-    output_size: list[int] | None,
     save_depth_map: bool,
     vis: bool,
     log: Path | None,
@@ -380,17 +372,6 @@ def main(
                     ),
                     rows=1,
                     cols=3,
-                    resize=(
-                        (output_size[0], output_size[1])
-                        if output_size is not None
-                        else None
-                    ),
-                    # NOTE: Resize depth map with nearest neighbor interpolation
-                    interpolation=[
-                        cv2.INTER_LINEAR,
-                        cv2.INTER_NEAREST,
-                        cv2.INTER_LINEAR,
-                    ],
                 )
             )
             save_dir = (out_dir / "vis" / img_path.relative_to(img_dir)).parent
@@ -399,7 +380,7 @@ def main(
                 logger.info(
                     f"Created directory for saving visualization outputs at {save_dir}"
                 )
-            visualized_path = save_dir / f"{img_path.stem}_vis.jpg"
+            visualized_path = save_dir / f"{img_path.stem}_vis.png"
             visualized.save(visualized_path)
             logger.info(f"Saved visualized outputs at {visualized_path}")
     logger.success(f"Finished processing {len(img_paths):,} input pairs")
