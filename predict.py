@@ -203,11 +203,13 @@ def main(
                 seg_meta_path,
                 columns={"id": int, "name": str, "r": int, "g": int, "b": int},
             )
-            try:
-                seg_sky_id = seg_meta["id"][seg_meta["name"].index("sky")]
-            except ValueError:
-                logger.warning("class=sky not found in segmentation map")
-                seg_sky_id = None
+            seg_ids: dict[str, int | None] = {}
+            for name in ["sky", "ego_vehicle", "road"]:
+                try:
+                    seg_ids[name] = seg_meta["id"][seg_meta["name"].index(name)]
+                except ValueError:
+                    logger.warning(f"class={name} not found in segmentation map")
+                    seg_ids[name] = None
 
     # Get paths of input images
     img_paths_all = utils.get_img_paths(img_dir)
@@ -307,8 +309,8 @@ def main(
         # Add segmentation hints to depth map
         if seg is not None:
             # Set sky pixels to max distance
-            if seg_sky_id is not None:
-                depth[(seg == seg_sky_id) & (depth <= 0)] = max_distance
+            if seg_ids["sky"] is not None:
+                depth[(seg == seg_ids["sky"]) & (depth <= 0)] = max_distance
 
         # Run inference
         start_time = time.time()
@@ -328,8 +330,8 @@ def main(
         # Postprocess
         if postprocess:
             if seg_dir is not None:
-                if seg_sky_id is not None:
-                    depth_pred[seg == seg_sky_id] = max_distance
+                if seg_ids["sky"] is not None:
+                    depth_pred[seg == seg_ids["sky"]] = max_distance
 
         # Save inferenced depth map
         if save_depth_map:
