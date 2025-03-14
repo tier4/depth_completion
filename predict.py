@@ -54,7 +54,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 @click.option(
     "--vae",
     type=click.Choice(["original", "light"]),
-    default="original",
+    default="light",
     help="VAE model to use for depth completion. "
     "original - The original VAE model from Marigold (e.g. Stable Diffusion VAE). "
     f"light - A lightweight VAE model from {VAE_CKPT_LIGHT}.",
@@ -119,7 +119,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     "-dt",
     "--dtype",
     type=click.Choice(["fp16", "bf16", "fp32"]),
-    default="fp32",
+    default="bf16",
     help="Data precision for inference.",
     show_default=True,
 )
@@ -150,7 +150,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 @click.option(
     "--postprocess",
     type=bool,
-    default=False,
+    default=True,
     help="Whether to postprocess the predicted depth maps.",
     show_default=True,
 )
