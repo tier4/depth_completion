@@ -203,13 +203,10 @@ def main(
                 seg_meta_path,
                 columns={"id": int, "name": str, "r": int, "g": int, "b": int},
             )
-            seg_ids: dict[str, int | None] = {}
-            for name in ["sky", "ego_vehicle", "road"]:
-                try:
-                    seg_ids[name] = seg_meta["id"][seg_meta["name"].index(name)]
-                except ValueError:
-                    logger.warning(f"class={name} not found in segmentation map")
-                    seg_ids[name] = None
+            seg_ids: dict[str, int] = {
+                seg_meta["name"][i]: seg_meta["id"][i]
+                for i in range(len(seg_meta["name"]))
+            }
 
     # Get paths of input images
     img_paths_all = utils.get_img_paths(img_dir)
@@ -309,8 +306,41 @@ def main(
         # Add segmentation hints to depth map
         if seg is not None:
             # Set sky pixels to max distance
-            if seg_ids["sky"] is not None:
-                depth[(seg == seg_ids["sky"]) & (depth <= 0)] = max_distance
+            depth_orig = depth.copy()
+            depth_dst = depth.copy()
+            if "sky" in seg_ids:
+                depth_dst[(seg == seg_ids["sky"]) & (depth_orig <= 0)] = max_distance
+            for name in [
+                "ego_vehicle",
+                "road",
+                "crosswalk",
+                "striped_road_marking",
+            ]:
+                if name in seg_ids:
+                    seg_mask = seg == seg_ids[name]
+                    seg_mask_with_sparse_depth = (depth_orig > 0) & seg_mask
+
+                    # Calculate sum of depth values for each row where mask is True
+                    row_sums = np.sum(depth_orig * seg_mask_with_sparse_depth, axis=-1)
+
+                    # Count number of valid depth points in each row
+                    row_counts = np.sum(seg_mask_with_sparse_depth, axis=-1)
+
+                    # Avoid division by zero by setting counts of 0 to 1
+                    safe_counts = np.maximum(row_counts, 1)
+
+                    # Calculate average of non-zero depth values for each row
+                    completion_depth_values = row_sums / safe_counts
+
+                    # Only use average values where we had at least one valid depth point
+                    completion_depth_values = np.where(
+                        row_counts > 0, completion_depth_values, 0
+                    )
+
+                    for y in range(completion_depth_values.shape[0]):
+                        if completion_depth_values[y] > 0:
+                            depth_dst[y, seg_mask[y]] = completion_depth_values[y]
+            depth = depth_dst
 
         # Run inference
         start_time = time.time()
@@ -330,9 +360,10 @@ def main(
         # Postprocess
         if postprocess:
             if seg_dir is not None:
-                if seg_ids["sky"] is not None:
+                if "sky" in seg_ids:
                     depth_pred[seg == seg_ids["sky"]] = max_distance
-
+                if "ego_vehicle" in seg_ids:
+                    depth_pred[seg == seg_ids["ego_vehicle"]] = 1.0
         # Save inferenced depth map
         if save_depth_map:
             save_dir = (out_dir / "depth" / img_path.relative_to(img_dir)).parent
@@ -382,7 +413,7 @@ def main(
                 logger.info(
                     f"Created directory for saving visualization outputs at {save_dir}"
                 )
-            visualized_path = save_dir / f"{img_path.stem}_vis.png"
+            visualized_path = save_dir / f"{img_path.stem}_vis.jpg"
             visualized.save(visualized_path)
             logger.info(f"Saved visualized outputs at {visualized_path}")
     logger.success(f"Finished processing {len(img_paths):,} input pairs")
