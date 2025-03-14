@@ -36,7 +36,18 @@ VAE_CKPT_LIGHT = "madebyollin/taesd"
 class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
     """
     Pipeline for Marigold Depth Completion.
-    Extends the MarigoldDepthPipeline to include depth completion functionality.
+
+    This pipeline extends the MarigoldDepthPipeline to perform depth completion,
+    which takes an RGB image and sparse depth measurements as input and produces
+    a dense depth map as output. The pipeline uses a diffusion model to iteratively
+    refine the depth prediction while respecting the sparse depth constraints.
+
+    The depth completion process involves:
+    1. Encoding the input image into latent space
+    2. Optimizing the latent representation to match sparse depth points
+    3. Using a parametrized affine transformation to convert from the model's
+       depth representation to metric depth values
+    4. Iteratively refining the prediction through a guided diffusion process
     """  # noqa: E501
 
     def __call__(
@@ -47,28 +58,33 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         processing_resolution: int = 768,
         seed: int = 2024,
         elemwise_scaling: bool = False,
+        interpolation_mode: str = "bilinear",
     ) -> np.ndarray:
         """
+        Perform depth completion on an RGB image using sparse depth measurements.
+
         Args:
-            image (PIL.Image.Image): Input image of shape [H, W] with 3 channels.
-            sparse_depth (np.ndarray): Sparse depth guidance of shape [H, W].
-            depth_range (tuple[float, float] | None, optional): Min and max depth values
-                to constrain output. If None, range is determined from sparse_depth.
-                Defaults to None.
+            image (PIL.Image.Image): Input RGB image.
+            sparse_depth (np.ndarray): Sparse depth measurements of shape [H, W].
+                Should have zeros at missing positions and positive values at
+                measurement points.
             num_inference_steps (int, optional): Number of denoising steps.
+                Higher values give better quality but slower inference.
                 Defaults to 50.
-            processing_resolution (int, optional): Resolution for processing.
+            processing_resolution (int, optional): Resolution for internal processing.
+                Higher values give better quality but use more memory.
                 Defaults to 768.
-            seed (int, optional): Random seed. Defaults to 2024.
+            seed (int, optional): Random seed for reproducibility. Defaults to 2024.
+            elemwise_scaling (bool, optional): Whether to use element-wise scaling
+                for the affine transformation. Defaults to False.
+            interpolation_mode (str, optional): Interpolation mode for resizing.
+                Options are "bilinear" or "nearest". Defaults to "bilinear".
 
         Returns:
             np.ndarray: Dense depth prediction of shape [H, W].
 
         Raises:
-            ValueError: If depth_range is not a tuple of two floats with min < max.
-            ValueError: If num_inference_steps is None.
             ValueError: If sparse_depth is not a 2D numpy array.
-            ValueError: If sparse_depth dimensions don't match image dimensions.
         """  # noqa: E501
 
         # Resolving variables
@@ -114,7 +130,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         # Preprocess sparse depth
         sparse_depth = torch.from_numpy(sparse_depth)[None, None].float().to(device)
         sparse_mask = sparse_depth > 0
-        logging.info(f"Using {sparse_mask.int().sum().item()} guidance points")
 
         # Set up optimization targets and compute
         # the range and lower bound of the sparse depth
@@ -157,7 +172,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             affine_invariant_prediction = self.image_processor.resize_antialias(
                 affine_invariant_prediction,
                 original_resolution,
-                "bilinear",
+                interpolation_mode,
                 is_aa=False,
             )  # [E,1,H,W]
             prediction = affine_to_metric(affine_invariant_prediction)

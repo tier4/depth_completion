@@ -150,8 +150,15 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 @click.option(
     "--postprocess",
     type=bool,
-    default=True,
+    default=False,
     help="Whether to postprocess the predicted depth maps.",
+    show_default=True,
+)
+@click.option(
+    "--interp-mode",
+    type=click.Choice(["bilinear", "nearest"]),
+    default="bilinear",
+    help="Interpolation mode for depth completion.",
     show_default=True,
 )
 def main(
@@ -175,6 +182,7 @@ def main(
     postprocess: bool,
     use_compile: bool,
     elemwise_scaling: bool,
+    interp_mode: Literal["bilinear", "nearest"],
 ) -> None:
     # Set log level
     logger.remove()
@@ -350,6 +358,7 @@ def main(
             num_inference_steps=steps,
             processing_resolution=res,
             elemwise_scaling=elemwise_scaling,
+            interpolation_mode=interp_mode,
         )
         duration_pred = time.time() - start_time
         logger.info(f"Inference time: {duration_pred:.2f} seconds")
