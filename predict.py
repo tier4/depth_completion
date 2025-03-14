@@ -314,10 +314,9 @@ def main(
         # Add segmentation hints to depth map
         if seg is not None:
             # Set sky pixels to max distance
-            depth_orig = depth.copy()
-            depth_dst = depth.copy()
+            depth_src = depth.copy()
             if "sky" in seg_ids:
-                depth_dst[(seg == seg_ids["sky"]) & (depth_orig <= 0)] = max_distance
+                depth[(seg == seg_ids["sky"]) & (depth_src <= 0)] = max_distance
             for name in [
                 "ego_vehicle",
                 "road",
@@ -326,10 +325,10 @@ def main(
             ]:
                 if name in seg_ids:
                     seg_mask = seg == seg_ids[name]
-                    seg_mask_with_sparse_depth = (depth_orig > 0) & seg_mask
+                    seg_mask_with_sparse_depth = (depth_src > 0) & seg_mask
 
                     # Calculate sum of depth values for each row where mask is True
-                    row_sums = np.sum(depth_orig * seg_mask_with_sparse_depth, axis=-1)
+                    row_sums = np.sum(depth_src * seg_mask_with_sparse_depth, axis=-1)
 
                     # Count number of valid depth points in each row
                     row_counts = np.sum(seg_mask_with_sparse_depth, axis=-1)
@@ -347,8 +346,7 @@ def main(
 
                     for y in range(completion_depth_values.shape[0]):
                         if completion_depth_values[y] > 0:
-                            depth_dst[y, seg_mask[y]] = completion_depth_values[y]
-            depth = depth_dst
+                            depth[y, seg_mask[y]] = completion_depth_values[y]
 
         # Run inference
         start_time = time.time()
@@ -371,8 +369,7 @@ def main(
             if seg_dir is not None:
                 if "sky" in seg_ids:
                     depth_pred[seg == seg_ids["sky"]] = max_distance
-                if "ego_vehicle" in seg_ids:
-                    depth_pred[seg == seg_ids["ego_vehicle"]] = 1.0
+
         # Save inferenced depth map
         if save_depth_map:
             save_dir = (out_dir / "depth" / img_path.relative_to(img_dir)).parent
