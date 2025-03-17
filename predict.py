@@ -157,7 +157,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 @click.option(
     "--interp-mode",
     type=click.Choice(["bilinear", "nearest"]),
-    default="bilinear",
+    default="nearest",
     help="Interpolation mode for depth completion.",
     show_default=True,
 )
