@@ -8,6 +8,7 @@ ARG WORKDIR=$USER_HOME/dev
 ARG PYTHON_VERSION=3.11.9
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=en_US.UTF-8
+ENV PIP_DEFAULT_TIMEOUT=1000
 WORKDIR ${WORKDIR}
 
 # Install system dependencies
@@ -48,5 +49,8 @@ RUN curl RUN curl https://pyenv.run | bash \
     && echo 'eval "$(pyenv init -)"' >> ${USER_HOME}/.profile \
     && . ${USER_HOME}/.profile \
     && pyenv install $PYTHON_VERSION \
-    && pyenv global $PYTHON_VERSION \
+    && pyenv global $PYTHON_VERSION
+
+# Install dependencies
+RUN . ${USER_HOME}/.profile \
     && pip install -r requirements.txt
