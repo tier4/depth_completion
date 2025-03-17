@@ -127,14 +127,14 @@ def load_array(path: Path) -> np.ndarray:
 def save_array(
     x: np.ndarray,
     path: Path,
-    compress: Literal["npz", "bl2"] | None = None,
+    compress: str | None = None,
 ) -> None:
     """Save a numpy array to disk with optional compression.
 
     Args:
         x (np.ndarray): The numpy array to save
         path (Path): Path where the array should be saved
-        compress (Literal["npz", "bl2"] | None, optional): The compression format to use.
+        compress (str | None, optional): The compression format to use.
             "npz" uses numpy's compressed format, "bl2" uses blosc2 compression.
             If None, saves uncompressed. Defaults to None.
 

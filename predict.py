@@ -1,7 +1,6 @@
 import sys
 import time
 from pathlib import Path
-from typing import Literal
 
 import click
 import numpy as np
@@ -43,7 +42,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "--marigold",
+    "--model",
     type=click.Choice(["original", "lcm"]),
     default="original",
     help="Marigold model to use for depth completion. "
@@ -92,7 +91,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     help="Whether to save visualization of output depth maps.",
 )
 @click.option(
-    "--save-depth-map",
+    "--save-depth",
     type=bool,
     default=True,
     help="Whether to save the inferenced depth maps. "
@@ -116,8 +115,8 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "-dt",
-    "--dtype",
+    "-p",
+    "--precision",
     type=click.Choice(["fp16", "bf16", "fp32"]),
     default="bf16",
     help="Data precision for inference.",
@@ -130,7 +129,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     default="bl2",
     help="Specify the compression format for the output depth maps. "
     "If none, saves uncompressed. "
-    "This option is ignored if --save-depth-map=False",
+    "This option is ignored if --save-depth=False",
     show_default=True,
 )
 @click.option(
@@ -145,13 +144,6 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     type=bool,
     default=False,
     help="Whether to use element-wise scaling for depth completion.",
-    show_default=True,
-)
-@click.option(
-    "--postprocess",
-    type=bool,
-    default=True,
-    help="Whether to postprocess the predicted depth maps.",
     show_default=True,
 )
 @click.option(
@@ -174,23 +166,20 @@ def main(
     depth_dir: Path,
     out_dir: Path,
     seg_dir: Path | None,
-    marigold: Literal["original", "lcm"],
-    vae: Literal["original", "light"],
+    model: str,
+    vae: str,
     steps: int,
     res: int,
     max_distance: float,
-    save_depth_map: bool,
+    save_depth: bool,
     vis: bool,
     log: Path | None,
-    log_level: Literal[
-        "TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"
-    ],
-    dtype: Literal["bf16", "fp32"],
-    compress: Literal["npz", "bl2", "none"],
-    postprocess: bool,
+    log_level: str,
+    precision: str,
+    compress: str,
     use_compile: bool,
     elemwise_scaling: bool,
-    interp_mode: Literal["bilinear", "nearest"],
+    interp_mode: str,
     loss_funcs: list[str],
 ) -> None:
     # Set log level
@@ -217,7 +206,6 @@ def main(
         else:
             loss_funcs_.append(loss_func)
     loss_funcs = loss_funcs_
-    logger.info(f"Using loss functions: {loss_funcs}")
 
     # Load segmentation mapping data (if provided)
     if seg_dir is not None:
@@ -237,8 +225,6 @@ def main(
 
     # Get paths of input images
     img_paths_all = utils.get_img_paths(img_dir)
-
-    # Sort input image paths by filename
     img_paths_all.sort(key=lambda x: x.name)
 
     # Get paths of input depth images and optionally segmentation maps
@@ -256,50 +242,72 @@ def main(
             )
         )
         if len(depth_path_candidates) == 0:
-            logger.warning(f"No depth map found for {path} (skipping)")
+            logger.warning(f"No depth map found for image {path} (skipped)")
             continue
         if seg_dir is not None:
-            seg_path = seg_dir / path.relative_to(img_dir).with_suffix(".npy")
-            if not seg_path.exists():
-                logger.warning(f"No segmentation map found for {path} (skipping)")
+            seg_path_candidates = list(
+                filter(
+                    lambda p: p.exists(),
+                    [
+                        seg_dir / path.relative_to(img_dir).with_suffix(ext)
+                        for ext in NPARRAY_EXTENSIONS
+                    ],
+                )
+            )
+            if len(seg_path_candidates) == 0:
+                logger.warning(f"No segmentation map found for image{path} (skipped)")
                 continue
+            seg_paths.append(seg_path_candidates[0])
         depth_paths.append(depth_path_candidates[0])
         img_paths.append(path)
-        if seg_dir is not None:
-            seg_paths.append(seg_path)
     if len(img_paths) == 0:
-        logger.error("No valid input pairs found")
+        logger.critical("No valid input found")
         sys.exit(1)
     logger.info(f"Found {len(depth_paths):,} input pairs")
 
     # Create output directory if it doesn't exist
     if not out_dir.exists():
         out_dir.mkdir(parents=True)
-        logger.info(f"Created output directory at {out_dir}")
 
-    # Initialize pipeline
-    # NOTE: Do not use float16 as it will make nans in predictions
-    torch_dtype = torch.bfloat16 if dtype == "bf16" else torch.float32
-    if marigold == "original":
+    # Select computation precision
+    # NOTE: fp16 may produce nans in prediction outputs
+    if precision == "fp32":
+        dtype = torch.float32
+    elif precision == "fp16":
+        dtype = torch.float16
+    else:  # precision == "bf16"
+        dtype = torch.bfloat16
+
+    # Select marigold checkpoint
+    if model == "original":
         marigold_ckpt = MARIGOLD_CKPT_ORIGINAL
     else:  # marigold == "lcm"
         marigold_ckpt = MARIGOLD_CKPT_LCM
     pipe = MarigoldDepthCompletionPipeline.from_pretrained(
         marigold_ckpt,
         prediction_type="depth",
-        torch_dtype=torch_dtype,
+        torch_dtype=dtype,
     ).to("cuda")
+
+    # Select vae checkpoint
     if vae == "light":
         pipe.vae = AutoencoderTiny.from_pretrained(
-            VAE_CKPT_LIGHT, torch_dtype=torch_dtype
+            VAE_CKPT_LIGHT, torch_dtype=dtype
         ).to("cuda")
+
+    # Set scheduler
     pipe.scheduler = DDIMScheduler.from_config(
         pipe.scheduler.config, timestep_spacing="trailing"
     )
+
+    # Compile model for faster inference
     if use_compile:
         pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead", fullgraph=True)
         pipe.vae = torch.compile(pipe.vae, mode="reduce-overhead", fullgraph=True)
-    logger.info(f"Initialized inference pipeline (dtype={dtype}, vae={vae})")
+    logger.info(
+        f"Initialized inference pipeline "
+        f"(dtype={precision}, vae={vae}, model={model}, loss_funcs={loss_funcs})"
+    )
 
     # Evaluation loop
     for i, (img_path, depth_path) in enumerate(
@@ -312,7 +320,7 @@ def main(
         # Load camera image
         img, is_valid = utils.load_img(img_path, "RGB")
         if not is_valid:
-            logger.warning(f"Empty input image found: {img_path} (skipping)")
+            logger.error(f"Empty input image found: {img_path} (skipped)")
             continue
 
         # Load depth map
@@ -323,53 +331,56 @@ def main(
         if seg_dir is not None:
             seg = utils.load_array(seg_paths[i])
             if seg.shape != depth.shape:
-                logger.warning(
-                    f"Segmentation map shape {seg.shape} does not match "
-                    f"depth map shape {depth.shape}. "
+                logger.error(
+                    f"Shape of segmentation map {seg_paths[i]} does not match "
+                    f"shape of depth map {depth_path}. "
                     f"Segmentation map will be ignored."
                 )
                 seg = None
 
-        # Add segmentation hints to depth map
+        # Add guides to depth map using segmentation map
         if seg is not None:
             # Set sky pixels to max distance
             depth_src = depth.copy()
             if "sky" in seg_ids:
                 depth[(seg == seg_ids["sky"]) & (depth_src <= 0)] = max_distance
-            for name in [
+            # Complete missing depth values using segmentation map for specific classes
+            for class_name in [
                 "ego_vehicle",
                 "road",
                 "crosswalk",
                 "striped_road_marking",
             ]:
-                if name in seg_ids:
-                    seg_mask = seg == seg_ids[name]
-                    seg_mask_with_sparse_depth = (depth_src > 0) & seg_mask
+                if class_name not in seg_ids:
+                    continue
+                seg_mask = seg == seg_ids[class_name]
+                seg_mask_with_sparse_depth = (depth_src > 0) & seg_mask
 
-                    # Calculate sum of depth values for each row where mask is True
-                    row_sums = np.sum(depth_src * seg_mask_with_sparse_depth, axis=-1)
+                # Calculate sum of depth values for each row where mask is True
+                row_sums = np.sum(depth_src * seg_mask_with_sparse_depth, axis=-1)
 
-                    # Count number of valid depth points in each row
-                    row_counts = np.sum(seg_mask_with_sparse_depth, axis=-1)
+                # Count number of valid depth points in each row
+                row_counts = np.sum(seg_mask_with_sparse_depth, axis=-1)
 
-                    # Avoid division by zero by setting counts of 0 to 1
-                    safe_counts = np.maximum(row_counts, 1)
+                # Avoid division by zero by setting counts of 0 to 1
+                safe_counts = np.maximum(row_counts, 1)
 
-                    # Calculate average of non-zero depth values for each row
-                    completion_depth_values = row_sums / safe_counts
+                # Calculate average of non-zero depth values for each row
+                completion_depth_values = row_sums / safe_counts
 
-                    # Only use average values where we had at least one valid depth point
-                    completion_depth_values = np.where(
-                        row_counts > 0, completion_depth_values, 0
-                    )
+                # Only use average values where we had at least one valid depth point
+                completion_depth_values = np.where(
+                    row_counts > 0, completion_depth_values, 0
+                )
 
-                    for y in range(completion_depth_values.shape[0]):
-                        if completion_depth_values[y] > 0:
-                            depth[y, seg_mask[y]] = completion_depth_values[y]
+                # Update depth map
+                for y in range(completion_depth_values.shape[0]):
+                    if completion_depth_values[y] > 0:
+                        depth[y, seg_mask[y]] = completion_depth_values[y]
 
         # Run inference
-        start_time = time.time()
-        depth_pred = pipe(
+        start = time.time()
+        depth_pred: np.ndarray = pipe(
             image=img,
             sparse_depth=depth,
             num_inference_steps=steps,
@@ -378,55 +389,43 @@ def main(
             interpolation_mode=interp_mode,
             loss_funcs=loss_funcs,
         )
-        duration_pred = time.time() - start_time
-        logger.info(f"Inference time: {duration_pred:.2f} seconds")
+        end = time.time()
+        logger.info(f"Inference time: {end - start:.3f} [s]")
         if utils.has_nan(depth_pred):
-            logger.error("NaN values found in inferenced depth map (skipping)")
+            logger.error("NaN values found in inferenced depth map (skipped)")
             continue
 
-        # Postprocess
-        if postprocess:
-            if seg_dir is not None:
-                if "sky" in seg_ids:
-                    depth_pred[seg == seg_ids["sky"]] = max_distance
-
         # Save inferenced depth map
-        if save_depth_map:
+        if save_depth:
             save_dir = (out_dir / "depth" / img_path.relative_to(img_dir)).parent
             if not save_dir.exists():
                 save_dir.mkdir(parents=True)
-                logger.info(
-                    f"Created output directory for saving depth maps at {save_dir}"
-                )
             if compress != "none":
-                depth_pred_path = save_dir / img_path.with_suffix(f".{compress}").name
+                save_path = save_dir / img_path.with_suffix(f".{compress}").name
             else:
-                depth_pred_path = save_dir / img_path.with_suffix(".npy").name
+                save_path = save_dir / img_path.with_suffix(".npy").name
             utils.save_array(
                 depth_pred,
-                depth_pred_path,
+                save_path,
                 compress=compress if compress != "none" else None,
             )
-            logger.info(f"Saved inferenced depth map at {depth_pred_path}")
+            logger.info(f"Saved inferenced depth map at {save_path}")
 
         # Save visualization of inferenced depth map
         if vis:
-            depth_visualized = pipe.image_processor.visualize_depth(
+            depth_vis = pipe.image_processor.visualize_depth(
                 depth, val_min=0, val_max=max_distance
             )[0]
-            depth_visualized = np.array(depth_visualized)
-            depth_visualized[depth <= 0] = 0
-            depth_visualized = Image.fromarray(depth_visualized)
-            depth_pred_visualized = pipe.image_processor.visualize_depth(
+            depth_vis = np.array(depth_vis)
+            depth_vis[depth <= 0] = 0
+            depth_vis = Image.fromarray(depth_vis)
+            depth_pred_vis = pipe.image_processor.visualize_depth(
                 depth_pred, val_min=0, val_max=max_distance
             )[0]
-            visualized = Image.fromarray(
+            out = Image.fromarray(
                 utils.make_grid(
                     np.stack(
-                        [
-                            np.asarray(im)
-                            for im in [img, depth_visualized, depth_pred_visualized]
-                        ],
+                        [np.asarray(im) for im in [img, depth_vis, depth_pred_vis]],
                         axis=0,
                     ),
                     rows=1,
@@ -436,12 +435,9 @@ def main(
             save_dir = (out_dir / "vis" / img_path.relative_to(img_dir)).parent
             if not save_dir.exists():
                 save_dir.mkdir(parents=True)
-                logger.info(
-                    f"Created directory for saving visualization outputs at {save_dir}"
-                )
-            visualized_path = save_dir / f"{img_path.stem}_vis.jpg"
-            visualized.save(visualized_path)
-            logger.info(f"Saved visualized outputs at {visualized_path}")
+            save_path = save_dir / f"{img_path.stem}_vis.jpg"
+            out.save(save_path)
+            logger.info(f"Saved visualized outputs at {save_path}")
     logger.success(f"Finished processing {len(img_paths):,} input pairs")
 
 
