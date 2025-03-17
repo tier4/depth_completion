@@ -16,15 +16,10 @@
 # Please find bibtex at: https://github.com/prs-eth/Marigold-DC#-citation
 # More information can be found at https://marigolddepthcompletion.github.io
 # ---------------------------------------------------------------------------------
-import argparse
-import logging
-import os
-from typing import Literal
-
 import diffusers
 import numpy as np
 import torch
-from diffusers import DDIMScheduler, MarigoldDepthPipeline
+from diffusers import MarigoldDepthPipeline
 from PIL import Image
 from torchvision.transforms.functional import pil_to_tensor
 
@@ -351,88 +346,3 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         self.maybe_free_model_hooks()
 
         return prediction.squeeze()
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Marigold-DC Pipeline")
-
-    DEPTH_CHECKPOINT = "prs-eth/marigold-depth-v1-0"
-    parser.add_argument(
-        "--in-image", type=str, default="media/image.png", help="Input image"
-    )
-    parser.add_argument(
-        "--in-depth",
-        type=str,
-        default="media/sparse_100.npy",
-        help="Input sparse depth",
-    )
-    parser.add_argument(
-        "--out-depth",
-        type=str,
-        default="media/dense_100.npy",
-        help="Output dense depth",
-    )
-    parser.add_argument(
-        "--num_inference_steps", type=int, default=50, help="Denoising steps"
-    )
-    parser.add_argument(
-        "--processing_resolution", type=int, default=768, help="Denoising resolution"
-    )
-    parser.add_argument(
-        "--checkpoint", type=str, default=DEPTH_CHECKPOINT, help="Depth checkpoint"
-    )
-    args = parser.parse_args()
-
-    num_inference_steps = args.num_inference_steps
-    processing_resolution = args.processing_resolution
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        if torch.backends.mps.is_available():
-            device = torch.device("mps")
-        else:
-            device = torch.device("cpu")
-        processing_resolution_non_cuda = 512
-        num_inference_steps_non_cuda = 10
-        if processing_resolution > processing_resolution_non_cuda:
-            logging.warning(
-                f"CUDA not found: Reducing processing_resolution to "
-                f"{processing_resolution_non_cuda}"
-            )
-            processing_resolution = processing_resolution_non_cuda
-        if num_inference_steps > num_inference_steps_non_cuda:
-            logging.warning(
-                f"CUDA not found: Reducing num_inference_steps to {num_inference_steps_non_cuda}"
-            )
-            num_inference_steps = num_inference_steps_non_cuda
-
-    pipe = MarigoldDepthCompletionPipeline.from_pretrained(
-        args.checkpoint, prediction_type="depth"
-    ).to(device)
-    pipe.scheduler = DDIMScheduler.from_config(
-        pipe.scheduler.config, timestep_spacing="trailing"
-    )
-
-    if not torch.cuda.is_available():
-        logging.warning("CUDA not found: Using a lightweight VAE")
-        del pipe.vae
-        pipe.vae = diffusers.AutoencoderTiny.from_pretrained("madebyollin/taesd").to(
-            device
-        )
-
-    pred = pipe(
-        image=Image.open(args.in_image),
-        sparse_depth=np.load(args.in_depth),
-        num_inference_steps=num_inference_steps,
-        processing_resolution=processing_resolution,
-    )
-
-    np.save(args.out_depth, pred)
-    vis = pipe.image_processor.visualize_depth(
-        pred, val_min=pred.min(), val_max=pred.max()
-    )[0]
-    vis.save(os.path.splitext(args.out_depth)[0] + "_vis.jpg")
-
-
-if __name__ == "__main__":
-    main()
