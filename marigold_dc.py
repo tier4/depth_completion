@@ -110,7 +110,7 @@ def compute_loss(
 
 class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
     """
-    Pipeline for Marigold Depth Completion.
+    Pipeline for depth completion using the Marigold model.
 
     This pipeline extends the MarigoldDepthPipeline to perform depth completion,
     which takes an RGB image and sparse depth measurements as input and produces
@@ -123,7 +123,16 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
     3. Using a parametrized affine transformation to convert from the model's
        depth representation to metric depth values
     4. Iteratively refining the prediction through a guided diffusion process
-    """  # noqa: E501
+
+    Attributes:
+        empty_text_embedding (torch.Tensor): Cached empty text embedding for conditioning
+        tokenizer: Tokenizer for text inputs
+        text_encoder: Text encoder model
+        unet: U-Net model for denoising
+        scheduler: Diffusion scheduler
+        image_processor: Processor for image preprocessing and postprocessing
+        dtype: Data type for model computation
+    """
 
     def __call__(
         self,
@@ -155,6 +164,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 for the affine transformation. Defaults to False.
             interpolation_mode (str, optional): Interpolation mode for resizing.
                 Options are "bilinear" or "nearest". Defaults to "bilinear".
+            loss_funcs (list[str], optional): List of loss functions to use for
+                optimization. Options include "l1", "l2", "edge", and "smooth".
+                Defaults to ["l1", "l2"].
 
         Returns:
             np.ndarray: Dense depth prediction of shape [H, W].
