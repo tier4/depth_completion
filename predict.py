@@ -161,6 +161,20 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     "Available options: l1, l2, edge, smooth",
     show_default=True,
 )
+@click.option(
+    "--predict-normed",
+    type=bool,
+    default=False,
+    help="Whether to predict depth maps in normalized [0, 1] range.",
+    show_default=True,
+)
+@click.option(
+    "--overlay-sparse-depth",
+    type=bool,
+    default=False,
+    help="Whether to overlay sparse depth maps on inferenced depth maps.",
+    show_default=True,
+)
 def main(
     img_dir: Path,
     depth_dir: Path,
@@ -181,6 +195,8 @@ def main(
     elemwise_scaling: bool,
     interp_mode: str,
     loss_funcs: list[str],
+    predict_normed: bool,
+    overlay_sparse_depth: bool,
 ) -> None:
     # Set log level
     logger.remove()
@@ -337,6 +353,8 @@ def main(
 
         # Load depth map
         depth = utils.load_array(depth_path)
+        if predict_normed:
+            depth /= max_distance
 
         # Load segmentation map
         seg: np.ndarray | None = None
@@ -406,6 +424,14 @@ def main(
         if utils.has_nan(depth_pred):
             logger.error("NaN values found in inferenced depth map (skipped)")
             continue
+        if predict_normed:
+            depth_pred *= max_distance
+            depth *= max_distance
+
+        # Overlay sparse depth map on inferenced depth map
+        if overlay_sparse_depth:
+            mask = depth > 0
+            depth_pred[mask] = depth[mask]
 
         # Save inferenced depth map
         if save_depth:
