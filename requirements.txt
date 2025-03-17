@@ -2,6 +2,7 @@ diffusers==0.31.0
 numpy==2.2.1
 pillow==11.1.0
 torch==2.5.1
+torchvision==0.20.1
 transformers==4.47.1
 accelerate==1.2.1
 click==8.1.8
