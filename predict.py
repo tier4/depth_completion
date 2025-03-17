@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Literal
 
 import click
-import cv2
 import numpy as np
 import torch
 from diffusers import AutoencoderTiny, DDIMScheduler
