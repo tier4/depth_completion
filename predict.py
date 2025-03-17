@@ -275,6 +275,10 @@ def main(
         dtype = torch.float32
     elif precision == "fp16":
         dtype = torch.float16
+        logger.warning(
+            "fp16 precision tends to produce nans in prediction outputs. "
+            "We strongly recommend using bf16 precision instead"
+        )
     else:  # precision == "bf16"
         dtype = torch.bfloat16
 
@@ -283,16 +287,24 @@ def main(
         marigold_ckpt = MARIGOLD_CKPT_ORIGINAL
     else:  # marigold == "lcm"
         marigold_ckpt = MARIGOLD_CKPT_LCM
+    pipeline_args = {
+        "prediction_type": "depth",
+        "torch_dtype": dtype,
+    }
+    if precision == "fp16":
+        # NOTE: Need to set variant to "fp16" for fp16 inference.
+        # https://huggingface.co/docs/diffusers/using-diffusers/marigold_usage#speeding-up-inference
+        pipeline_args["variant"] = "fp16"
     pipe = MarigoldDepthCompletionPipeline.from_pretrained(
         marigold_ckpt,
-        prediction_type="depth",
-        torch_dtype=dtype,
+        **pipeline_args,
     ).to("cuda")
 
     # Select vae checkpoint
     if vae == "light":
         pipe.vae = AutoencoderTiny.from_pretrained(
-            VAE_CKPT_LIGHT, torch_dtype=dtype
+            VAE_CKPT_LIGHT,
+            torch_dtype=dtype,
         ).to("cuda")
 
     # Set scheduler
