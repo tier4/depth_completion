@@ -15,6 +15,7 @@ import utils
 from marigold_dc import (
     MARIGOLD_CKPT_LCM,
     MARIGOLD_CKPT_ORIGINAL,
+    SUPPORTED_LOSS_FUNCS,
     VAE_CKPT_LIGHT,
     MarigoldDepthCompletionPipeline,
 )
@@ -161,6 +162,14 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     help="Interpolation mode for depth completion.",
     show_default=True,
 )
+@click.option(
+    "--loss-funcs",
+    type=utils.CommaSeparated(str),
+    default="l1,l2",
+    help="Comma-separated list of loss functions to use for depth completion. "
+    "Available options: l1, l2, edge, smooth",
+    show_default=True,
+)
 def main(
     img_dir: Path,
     depth_dir: Path,
@@ -183,6 +192,7 @@ def main(
     use_compile: bool,
     elemwise_scaling: bool,
     interp_mode: Literal["bilinear", "nearest"],
+    loss_funcs: list[str],
 ) -> None:
     # Set log level
     logger.remove()
@@ -199,6 +209,16 @@ def main(
     if not torch.cuda.is_available():
         logger.critical("CUDA must be available to run this script.")
         sys.exit(1)
+
+    # Check loss functions
+    loss_funcs_ = []
+    for loss_func in loss_funcs:
+        if loss_func not in SUPPORTED_LOSS_FUNCS:
+            logger.error(f"Invalid loss function (skipped): {loss_func}")
+        else:
+            loss_funcs_.append(loss_func)
+    loss_funcs = loss_funcs_
+    logger.info(f"Using loss functions: {loss_funcs}")
 
     # Load segmentation mapping data (if provided)
     if seg_dir is not None:
@@ -357,6 +377,7 @@ def main(
             processing_resolution=res,
             elemwise_scaling=elemwise_scaling,
             interpolation_mode=interp_mode,
+            loss_funcs=loss_funcs,
         )
         duration_pred = time.time() - start_time
         logger.info(f"Inference time: {duration_pred:.2f} seconds")

@@ -19,18 +19,93 @@
 import argparse
 import logging
 import os
+from typing import Literal
 
 import diffusers
 import numpy as np
 import torch
 from diffusers import DDIMScheduler, MarigoldDepthPipeline
 from PIL import Image
+from torchvision.transforms.functional import pil_to_tensor
 
 diffusers.utils.logging.disable_progress_bar()
 
 MARIGOLD_CKPT_ORIGINAL = "prs-eth/marigold-v1-0"
 MARIGOLD_CKPT_LCM = "prs-eth/marigold-lcm-v1-0"
 VAE_CKPT_LIGHT = "madebyollin/taesd"
+SUPPORTED_LOSS_FUNCS = ["l1", "l2", "edge", "smooth"]
+
+
+def compute_loss(
+    depth_pred: torch.Tensor,
+    depth_target: torch.Tensor,
+    loss_funcs: list[str],
+    image: torch.Tensor | None = None,
+) -> torch.Tensor:
+    # depth_pred: [N, 1, H, W]
+    # depth_target: [N, 1, H, W]
+    # image: [N, 3, H, W]
+    if len(loss_funcs) == 0:
+        raise ValueError("loss_funcs must contain at least one loss function")
+    total = torch.tensor(0.0, device=depth_pred.device)
+    sparse_mask = depth_target > 0
+    for loss_func in loss_funcs:
+        if loss_func == "l1":
+            # Normal l1 loss function
+            total += torch.nn.functional.l1_loss(
+                depth_pred[sparse_mask], depth_target[sparse_mask]
+            )
+        elif loss_func == "l2":
+            # Normal l2 loss function
+            total += torch.nn.functional.mse_loss(
+                depth_pred[sparse_mask], depth_target[sparse_mask]
+            )
+        elif loss_func == "edge":
+            # Edge-preserving loss function using gradients
+            # of predicted depth and input image
+            if image is None:
+                raise ValueError("image must be provided for edge loss")
+            num_channels = image.shape[1]
+            if num_channels == 3:
+                # Convert image to grayscale
+                gray_image = (
+                    0.299 * image[:, 0:1]
+                    + 0.587 * image[:, 1:2]
+                    + 0.114 * image[:, 2:3]
+                )  # [N, 1, H, W]
+            elif num_channels == 1:
+                gray_image = image
+            else:
+                raise ValueError(f"Image must have 1 or 3 channels, got {num_channels}")
+            # Gradients of depth map in x and y directions
+            grad_pred_x = torch.abs(depth_pred[:, :, :, :-1] - depth_pred[:, :, :, 1:])
+            grad_pred_y = torch.abs(depth_pred[:, :, :-1, :] - depth_pred[:, :, 1:, :])
+
+            # Gradients of image (grayscale) in x and y directions
+            grad_gray_x = torch.abs(gray_image[:, :, :, :-1] - gray_image[:, :, :, 1:])
+            grad_gray_y = torch.abs(gray_image[:, :, :-1, :] - gray_image[:, :, 1:, :])
+
+            # The more similar the gradients of depth and image are,
+            # the more aligned the edges are considered to be
+            loss = torch.mean(torch.abs(grad_pred_x - grad_gray_x)) + torch.mean(
+                torch.abs(grad_pred_y - grad_gray_y)
+            )
+            total += loss
+        elif loss_func == "smooth":
+            # Smoothness loss function
+            # of predicted depth and input image
+            if image is None:
+                raise ValueError("image must be provided for smooth loss")
+            loss_h = torch.mean(
+                torch.abs(depth_pred[:, :, :-1, :] - depth_pred[:, :, 1:, :])
+            )
+            loss_w = torch.mean(
+                torch.abs(depth_pred[:, :, :, :-1] - depth_pred[:, :, :, 1:])
+            )
+            total += loss_h + loss_w
+        else:
+            raise ValueError(f"Unknown loss function: {loss_func}")
+    return total
 
 
 class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
@@ -59,6 +134,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         seed: int = 2024,
         elemwise_scaling: bool = False,
         interpolation_mode: str = "bilinear",
+        loss_funcs: list[str] | None = None,
     ) -> np.ndarray:
         """
         Perform depth completion on an RGB image using sparse depth measurements.
@@ -87,8 +163,11 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             ValueError: If sparse_depth is not a 2D numpy array.
         """  # noqa: E501
 
-        # Resolving variables
-        device = self._execution_device
+        if loss_funcs is None:
+            loss_funcs = ["l1", "l2"]
+
+        # Get random generator
+        device: torch.device = self._execution_device
         generator = torch.Generator(device=device).manual_seed(seed)
 
         # Check inputs.
@@ -108,23 +187,27 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     truncation=True,
                     return_tensors="pt",
                 )
-                text_input_ids = text_inputs.input_ids.to(device)
+                text_input_ids = text_inputs.input_ids.to(self._execution_device)
                 self.empty_text_embedding = self.text_encoder(text_input_ids)[
                     0
                 ]  # [1,2,1024]
 
         # Preprocess input images
-        image_tensor, padding, original_resolution = self.image_processor.preprocess(
-            image,
-            processing_resolution=processing_resolution,
-            device=device,
-            dtype=self.dtype,
+        # image_tensor = pil_to_tensor(image).to(device)
+        image_tensor = torch.unsqueeze(pil_to_tensor(image), 0).to(device)
+        image_tensor_resized, padding, original_resolution = (
+            self.image_processor.preprocess(
+                image_tensor,
+                processing_resolution=processing_resolution,
+                device=device,
+                dtype=self.dtype,
+            )
         )  # [N,3,PPH,PPW]
 
         # Encode input image into latent space
         with torch.no_grad():
             image_latent, pred_latent = self.prepare_latents(
-                image_tensor, None, generator, 1, 1
+                image_tensor_resized, None, generator, 1, 1
             )  # [N*E,4,h,w], [N*E,4,h,w]
 
         # Preprocess sparse depth
@@ -178,13 +261,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             prediction = affine_to_metric(affine_invariant_prediction)
             return prediction
 
-        def loss_l1l2(input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-            # Compute L1 and L2 loss between input and target.
-            out_l1 = torch.nn.functional.l1_loss(input, target)
-            out_l2 = torch.nn.functional.mse_loss(input, target)
-            out = out_l1 + out_l2
-            return out
-
         # Denoising loop
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         for t in self.scheduler.timesteps:
@@ -219,8 +295,11 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
             # Decode to metric space, compute loss with guidance and backpropagate
             current_metric_estimate = latent_to_metric(pred_original_sample)
-            loss = loss_l1l2(
-                current_metric_estimate[sparse_mask], sparse_depth[sparse_mask]
+            loss = compute_loss(
+                current_metric_estimate,
+                sparse_depth,
+                loss_funcs,
+                image=image_tensor,
             )
             loss.backward()
 
