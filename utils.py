@@ -1,7 +1,7 @@
 import csv
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import blosc2
 import click
@@ -22,6 +22,54 @@ CAMERA_CATEGORIES = [
     "CAM_BACK_WIDE",
     "CAM_BACK_NARROW",
 ]
+
+
+def crop_center(
+    image: np.ndarray, height_ratio: float, width_ratio: float
+) -> np.ndarray:
+    """Perform center crop on an image array.
+
+    Args:
+        image (np.ndarray): Input image array with shape (N, H, W) or (N, H, W, C).
+        height_ratio (float): Ratio of height to keep (0.0 to 1.0).
+        width_ratio (float): Ratio of width to keep (0.0 to 1.0).
+
+    Returns:
+        np.ndarray: Center cropped image with the same number of dimensions as input.
+
+    Raises:
+        ValueError: If height_ratio or width_ratio is not between 0 and 1.
+        ValueError: If image dimensions are not valid (must be 3D or 4D).
+
+    Examples:
+        >>> # Crop a batch of RGB images to 80% of height and 60% of width
+        >>> cropped = crop_center(images, 0.8, 0.6)
+    """
+    if not (0.0 < height_ratio <= 1.0) or not (0.0 < width_ratio <= 1.0):
+        raise ValueError("Height and width ratios must be between 0 and 1")
+
+    if image.ndim not in (3, 4):
+        raise ValueError(f"Expected 3D or 4D array, got {image.ndim}D")
+
+    # Get original dimensions
+    if image.ndim == 3:  # (N, H, W)
+        _, h, w = image.shape
+    else:  # (N, H, W, C)
+        _, h, w, _ = image.shape
+
+    # Calculate new dimensions
+    new_h = int(h * height_ratio)
+    new_w = int(w * width_ratio)
+
+    # Calculate start indices for cropping
+    start_h = (h - new_h) // 2
+    start_w = (w - new_w) // 2
+
+    # Perform the crop
+    if image.ndim == 3:
+        return image[:, start_h : start_h + new_h, start_w : start_w + new_w]
+    else:
+        return image[:, start_h : start_h + new_h, start_w : start_w + new_w, :]
 
 
 def load_csv(path: Path, columns: dict[str, type]) -> dict[str, list[Any]]:
@@ -304,11 +352,12 @@ def is_empty_img(img: Image.Image) -> bool:
     return not np.any(np.array(img))
 
 
-def load_img(path: Path, mode: str | None = None) -> tuple[Image.Image, bool]:
+def load_img(path: Path, mode: str | None = None) -> tuple[np.ndarray, bool]:
     """Load an image from a file path and check if it's empty.
 
     Opens an image file using PIL and optionally converts it to a specific color mode.
     Also checks if the image is empty (all values are 0).
+    Returns the image as a numpy array.
 
     Args:
         path (Path): Path to the image file to load
@@ -317,8 +366,8 @@ def load_img(path: Path, mode: str | None = None) -> tuple[Image.Image, bool]:
             Defaults to None.
 
     Returns:
-        tuple[Image.Image, bool]: A tuple containing:
-            - The loaded PIL Image object
+        tuple[np.ndarray, bool]: A tuple containing:
+            - The loaded image as a numpy array
             - A boolean indicating if the image is non-empty (True) or empty (False)
 
     Example:
@@ -327,8 +376,11 @@ def load_img(path: Path, mode: str | None = None) -> tuple[Image.Image, bool]:
         >>> # Load grayscale image
         >>> img, is_valid = load_img(Path("depth.png"), mode="L")
     """
-    img = Image.open(path).convert(mode)
-    if is_empty_img(img):
+    img_pil = Image.open(path)
+    if mode is not None:
+        img_pil = img_pil.convert(mode)
+    img = np.array(img_pil)
+    if not np.any(img):
         return img, False
     return img, True
 
