@@ -465,14 +465,13 @@ def main(
             )[0]
             depth_vis = np.array(depth_vis)
             depth_vis[depth <= 0] = 0
-            depth_vis = Image.fromarray(depth_vis)
             depth_pred_vis = pipe.image_processor.visualize_depth(
                 depth_pred, val_min=0, val_max=max_distance
             )[0]
             out = Image.fromarray(
                 utils.make_grid(
                     np.stack(
-                        [np.asarray(im) for im in [img, depth_vis, depth_pred_vis]],
+                        [img, depth_vis, depth_pred_vis],
                         axis=0,
                     ),
                     rows=1,

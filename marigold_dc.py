@@ -20,8 +20,6 @@ import diffusers
 import numpy as np
 import torch
 from diffusers import MarigoldDepthPipeline
-from PIL import Image
-from torchvision.transforms.functional import pil_to_tensor
 
 diffusers.utils.logging.disable_progress_bar()
 
@@ -131,7 +129,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
     def __call__(
         self,
-        image: Image.Image,
+        image: np.ndarray,
         sparse: np.ndarray,
         steps: int = 50,
         resolution: int = 768,
@@ -145,7 +143,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         Perform depth completion on an RGB image using sparse depth measurements.
 
         Args:
-            image (PIL.Image.Image): Input RGB image.
+            image (np.ndarray): Input RGB image of shape [H, W, C].
             sparse (np.ndarray): Sparse depth measurements of shape [H, W].
                 Should have zeros at missing positions and positive values at
                 measurement points.
@@ -204,7 +202,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 self.empty_text_embedding = self.text_encoder(text_input_ids)[0]
 
         # Preprocess input images
-        image_tensor = pil_to_tensor(image).unsqueeze(0).to(device)
+        # Convert image to channel-first format (N, C, H, W)
+        image_tensor = torch.from_numpy(image).permute(2, 0, 1).to(device)
         image_tensor_resized, padding, original_resolution = (
             self.image_processor.preprocess(
                 image_tensor,
