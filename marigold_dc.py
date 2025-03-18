@@ -203,7 +203,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 ]  # [1,2,1024]
 
         # Preprocess input images
-        # image_tensor = pil_to_tensor(image).to(device)
         image_tensor = torch.unsqueeze(pil_to_tensor(image), 0).to(device)
         image_tensor_resized, padding, original_resolution = (
             self.image_processor.preprocess(
