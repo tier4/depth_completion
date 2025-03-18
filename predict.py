@@ -419,12 +419,12 @@ def main(
         # Run inference
         start = time.time()
         depth_pred: np.ndarray = pipe(
-            image=img,
-            sparse_depth=depth,
-            num_inference_steps=steps,
-            processing_resolution=res,
+            img,
+            depth,
+            steps=steps,
+            resolution=res,
             elemwise_scaling=elemwise_scaling,
-            interpolation_mode=interp_mode,
+            interp_mode=interp_mode,
             loss_funcs=loss_funcs,
             aa=aa,
         )

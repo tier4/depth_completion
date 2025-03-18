@@ -132,12 +132,12 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
     def __call__(
         self,
         image: Image.Image,
-        sparse_depth: np.ndarray,
-        num_inference_steps: int = 50,
-        processing_resolution: int = 768,
+        sparse: np.ndarray,
+        steps: int = 50,
+        resolution: int = 768,
         seed: int = 2024,
         elemwise_scaling: bool = False,
-        interpolation_mode: str = "bilinear",
+        interp_mode: str = "bilinear",
         loss_funcs: list[str] | None = None,
         aa: bool = False,
     ) -> np.ndarray:
@@ -149,7 +149,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             sparse_depth (np.ndarray): Sparse depth measurements of shape [H, W].
                 Should have zeros at missing positions and positive values at
                 measurement points.
-            num_inference_steps (int, optional): Number of denoising steps.
+            steps (int, optional): Number of denoising steps.
                 Higher values give better quality but slower inference.
                 Defaults to 50.
             processing_resolution (int, optional): Resolution for internal processing.
@@ -158,7 +158,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             seed (int, optional): Random seed for reproducibility. Defaults to 2024.
             elemwise_scaling (bool, optional): Whether to use element-wise scaling
                 for the affine transformation. Defaults to False.
-            interpolation_mode (str, optional): Interpolation mode for resizing.
+            interp_mode (str, optional): Interpolation mode for resizing.
                 Options are "bilinear" or "nearest". Defaults to "bilinear".
             loss_funcs (list[str], optional): List of loss functions to use for
                 optimization. Options include "l1", "l2", "edge", and "smooth".
@@ -173,23 +173,26 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             ValueError: If sparse_depth is not a 2D numpy array.
         """  # noqa: E501
 
+        # Check inputs.
+        if sparse.ndim != 2:
+            raise ValueError(
+                "Sparse depth map must be a 2d numpy "
+                "array with zeros at missing positions"
+            )
+
+        # Set loss functions
         if loss_funcs is None:
             loss_funcs = ["l1", "l2"]
 
-        # Get random generator
+        # Set device
         device: torch.device = self._execution_device
+
+        # Get random generator
         generator = torch.Generator(device=device).manual_seed(seed)
 
-        # Check inputs.
-        if sparse_depth.ndim != 2:
-            raise ValueError(
-                "Sparse depth should be a 2D numpy "
-                "ndarray with zeros at missing positions"
-            )
-
         # Prepare empty text conditioning
-        with torch.no_grad():
-            if self.empty_text_embedding is None:
+        if self.empty_text_embedding is None:
+            with torch.no_grad():
                 text_inputs = self.tokenizer(
                     "",
                     padding="do_not_pad",
@@ -198,30 +201,29 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     return_tensors="pt",
                 )
                 text_input_ids = text_inputs.input_ids.to(self._execution_device)
-                self.empty_text_embedding = self.text_encoder(text_input_ids)[
-                    0
-                ]  # [1,2,1024]
+                self.empty_text_embedding = self.text_encoder(text_input_ids)[0]
 
         # Preprocess input images
-        image_tensor = torch.unsqueeze(pil_to_tensor(image), 0).to(device)
+        image_tensor = pil_to_tensor(image).unsqueeze(0).to(device)
         image_tensor_resized, padding, original_resolution = (
             self.image_processor.preprocess(
                 image_tensor,
-                processing_resolution=processing_resolution,
+                processing_resolution=resolution,
                 device=device,
                 dtype=self.dtype,
             )
-        )  # [N,3,PPH,PPW]
+        )  # (N, 3, PPH, PPW)
 
         # Encode input image into latent space
         with torch.no_grad():
             image_latent, pred_latent = self.prepare_latents(
                 image_tensor_resized, None, generator, 1, 1
-            )  # [N*E,4,h,w], [N*E,4,h,w]
+            )  # (N * E, 4, h, w), (N * E, 4, h, w)
 
         # Preprocess sparse depth
-        sparse_depth = torch.from_numpy(sparse_depth)[None, None].float().to(device)
-        sparse_mask = sparse_depth > 0
+        sparse = torch.from_numpy(sparse)[None, None].float().to(device)
+        sparse_mask = sparse > 0
+        guided_points = sparse[sparse_mask]
 
         # Set up optimization targets and compute
         # the range and lower bound of the sparse depth
@@ -234,10 +236,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 torch.ones(1, device=device)
             ), torch.nn.Parameter(torch.ones(1, device=device))
         pred_latent = torch.nn.Parameter(pred_latent)
-        depth_min = sparse_depth[sparse_mask].min()
-        depth_max = sparse_depth[sparse_mask].max()
-        sparse_range = depth_max - depth_min
-        sparse_lower = depth_min
+        sparse_min = guided_points.min()
+        sparse_max = guided_points.max()
+        sparse_range = sparse_max - sparse_min
 
         # Set up optimizer
         optimizer = torch.optim.Adam(
@@ -248,65 +249,56 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         )
 
         def affine_to_metric(depth: torch.Tensor) -> torch.Tensor:
-            # Convert affine invariant depth predictions to metric depth predictions
-            # using the parametrized scale and shift. See Equation 2 of the paper.
-            return (scale**2) * sparse_range * depth + (shift**2) * sparse_lower
+            return (scale**2) * sparse_range * depth + (shift**2) * sparse_min
 
-        def latent_to_metric(latent: torch.Tensor) -> torch.Tensor:
-            # Decode latent to affine invariant depth
-            # predictions and subsequently to metric depth predictions.
-            affine_invariant_prediction = self.decode_prediction(
-                latent
-            )  # [E,1,PPH,PPW]
-            affine_invariant_prediction = self.image_processor.unpad_image(
-                affine_invariant_prediction, padding
-            )  # [E,1,PH,PW]
-            affine_invariant_prediction = self.image_processor.resize_antialias(
-                affine_invariant_prediction,
+        def to_metric(latent: torch.Tensor) -> torch.Tensor:
+            affine_invariant_pred = self.decode_prediction(latent)  # (E, 1, PPH, PPW)
+            affine_invariant_pred = self.image_processor.unpad_image(
+                affine_invariant_pred, padding
+            )  # (E, 1, PH, PW)
+            affine_invariant_pred = self.image_processor.resize_antialias(
+                affine_invariant_pred,
                 original_resolution,
-                interpolation_mode,
+                interp_mode,
                 is_aa=aa,
-            )  # [E,1,H,W]
-            prediction = affine_to_metric(affine_invariant_prediction)
-            return prediction
+            )  # (E, 1, H, W)
+            pred = affine_to_metric(affine_invariant_pred)
+            return pred
 
         # Denoising loop
-        self.scheduler.set_timesteps(num_inference_steps, device=device)
+        self.scheduler.set_timesteps(steps, device=device)
         for t in self.scheduler.timesteps:
             optimizer.zero_grad()
 
             # Forward pass through the U-Net
-            batch_latent = torch.cat([image_latent, pred_latent], dim=1)  # [1,8,h,w]
-            noise = self.unet(
-                batch_latent,
+            latent = torch.cat([image_latent, pred_latent], dim=1)  # (1, 8, h, w)
+            noise = self.unet(  # (1, 4, h, w)
+                latent,
                 t,
                 encoder_hidden_states=self.empty_text_embedding,
                 return_dict=False,
-            )[
-                0
-            ]  # [1,4,h,w]
+            )[0]
 
             # Compute pred_epsilon to later rescale the depth latent gradient
             with torch.no_grad():
-                alpha_prod_t = self.scheduler.alphas_cumprod[t]
-                beta_prod_t = 1 - alpha_prod_t
-                pred_epsilon = (alpha_prod_t**0.5) * noise + (
-                    beta_prod_t**0.5
-                ) * pred_latent
+                a_prod_t = self.scheduler.alphas_cumprod[t]
+                b_prod_t = 1 - a_prod_t
+                pred_epsilon = (a_prod_t**0.5) * noise + (b_prod_t**0.5) * pred_latent
 
+            # Forward denoising step
             step_output = self.scheduler.step(
                 noise, t, pred_latent, generator=generator
             )
 
             # Preview the final output depth with
             # Tweedie's formula (See Equation 1 of the paper)
-            pred_original_sample = step_output.pred_original_sample
+            dense_preview = step_output.pred_original_sample
 
             # Decode to metric space, compute loss with guidance and backpropagate
-            current_metric_estimate = latent_to_metric(pred_original_sample)
+            dense_preview = to_metric(dense_preview)
             loss = compute_loss(
-                current_metric_estimate,
-                sparse_depth,
+                dense_preview,
+                sparse,
                 loss_funcs,
                 image=image_tensor,
             )
@@ -330,9 +322,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
         # Decode predictions from latent into pixel space
         with torch.no_grad():
-            prediction = latent_to_metric(pred_latent.detach())
+            dense = to_metric(pred_latent.detach())
 
         # return Numpy array
-        prediction = self.image_processor.pt_to_numpy(prediction)  # [N,H,W,1]
-
-        return prediction.squeeze()
+        dense = self.image_processor.pt_to_numpy(dense)  # [N,H,W,1]
+        return dense.squeeze()
