@@ -139,6 +139,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         elemwise_scaling: bool = False,
         interpolation_mode: str = "bilinear",
         loss_funcs: list[str] | None = None,
+        aa: bool = False,
     ) -> np.ndarray:
         """
         Perform depth completion on an RGB image using sparse depth measurements.
@@ -162,6 +163,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             loss_funcs (list[str], optional): List of loss functions to use for
                 optimization. Options include "l1", "l2", "edge", and "smooth".
                 Defaults to ["l1", "l2"].
+            aa (bool, optional): Whether to enable anti-aliasing during processing.
+                Defaults to False.
 
         Returns:
             np.ndarray: Dense depth prediction of shape [H, W].
@@ -263,7 +266,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 affine_invariant_prediction,
                 original_resolution,
                 interpolation_mode,
-                is_aa=False,
+                is_aa=aa,
             )  # [E,1,H,W]
             prediction = affine_to_metric(affine_invariant_prediction)
             return prediction
