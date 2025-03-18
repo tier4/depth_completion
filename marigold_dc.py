@@ -146,13 +146,13 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
         Args:
             image (PIL.Image.Image): Input RGB image.
-            sparse_depth (np.ndarray): Sparse depth measurements of shape [H, W].
+            sparse (np.ndarray): Sparse depth measurements of shape [H, W].
                 Should have zeros at missing positions and positive values at
                 measurement points.
             steps (int, optional): Number of denoising steps.
                 Higher values give better quality but slower inference.
                 Defaults to 50.
-            processing_resolution (int, optional): Resolution for internal processing.
+            resolution (int, optional): Resolution for internal processing.
                 Higher values give better quality but use more memory.
                 Defaults to 768.
             seed (int, optional): Random seed for reproducibility. Defaults to 2024.
@@ -170,7 +170,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             np.ndarray: Dense depth prediction of shape [H, W].
 
         Raises:
-            ValueError: If sparse_depth is not a 2D numpy array.
+            ValueError: If sparse is not a 2D numpy array.
         """  # noqa: E501
 
         # Check inputs.
