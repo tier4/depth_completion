@@ -251,7 +251,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         def affine_to_metric(depth: torch.Tensor) -> torch.Tensor:
             return (scale**2) * sparse_range * depth + (shift**2) * sparse_min
 
-        def to_metric(latent: torch.Tensor) -> torch.Tensor:
+        def latent_to_metric(latent: torch.Tensor) -> torch.Tensor:
             affine_invariant_pred = self.decode_prediction(latent)  # (E, 1, PPH, PPW)
             affine_invariant_pred = self.image_processor.unpad_image(
                 affine_invariant_pred, padding
@@ -292,12 +292,12 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
             # Preview the final output depth with
             # Tweedie's formula (See Equation 1 of the paper)
-            dense_preview = step_output.pred_original_sample
+            preview = step_output.pred_original_sample
 
             # Decode to metric space, compute loss with guidance and backpropagate
-            dense_preview = to_metric(dense_preview)
+            dense = latent_to_metric(preview)
             loss = compute_loss(
-                dense_preview,
+                dense,
                 sparse,
                 loss_funcs,
                 image=image_tensor,
@@ -322,8 +322,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
         # Decode predictions from latent into pixel space
         with torch.no_grad():
-            dense = to_metric(pred_latent.detach())
+            dense = latent_to_metric(pred_latent.detach())
 
         # return Numpy array
-        dense = self.image_processor.pt_to_numpy(dense)  # [N,H,W,1]
+        dense = self.image_processor.pt_to_numpy(dense)  # (N, H, W, 1)
         return dense.squeeze()
