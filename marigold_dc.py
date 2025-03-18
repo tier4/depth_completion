@@ -329,23 +329,11 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     noise, t, pred_latent, generator=generator
                 ).prev_sample
 
-            del (
-                pred_original_sample,
-                current_metric_estimate,
-                step_output,
-                pred_epsilon,
-                noise,
-            )
-            torch.cuda.empty_cache()
-
-        del image_latent
-
         # Decode predictions from latent into pixel space
         with torch.no_grad():
             prediction = latent_to_metric(pred_latent.detach())
 
         # return Numpy array
         prediction = self.image_processor.pt_to_numpy(prediction)  # [N,H,W,1]
-        self.maybe_free_model_hooks()
 
         return prediction.squeeze()
