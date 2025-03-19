@@ -172,7 +172,8 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     "--overlay-sparse",
     type=bool,
     default=False,
-    help="Whether to overlay sparse depth maps on inferenced depth maps.",
+    help="Whether to overlay sparse depth maps on visualization of "
+    "inferenced depth maps. Saved inferenced depth maps are not affected.",
     show_default=True,
 )
 @click.option(
@@ -463,11 +464,6 @@ def main(
             depth_pred *= max_distance
             depth *= max_distance
 
-        # Overlay sparse depth map on inferenced depth map
-        if overlay_sparse:
-            mask = depth > 0
-            depth_pred[mask] = depth[mask]
-
         # Save inferenced depth map
         if save_depth:
             save_dir = (out_dir / "depth" / img_path.relative_to(img_dir)).parent
@@ -491,6 +487,10 @@ def main(
             )[0]
             depth_vis = np.array(depth_vis)
             depth_vis[depth <= 0] = 0
+            # Overlay sparse depth map on inferenced depth map
+            if overlay_sparse:
+                mask = depth > 0
+                depth_pred[mask] = depth[mask]
             depth_pred_vis = pipe.image_processor.visualize_depth(
                 depth_pred, val_min=0, val_max=max_distance
             )[0]
