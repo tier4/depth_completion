@@ -27,9 +27,3 @@ services:
         source: .
         target: /home/user/dev
         consistency: delegated
-      - type: volume
-        source: data
-        target: /home/user/dev/data
-
-volumes:
-  data:
