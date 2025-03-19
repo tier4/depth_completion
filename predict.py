@@ -169,7 +169,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "--overlay-sparse-depth",
+    "--overlay-sparse",
     type=bool,
     default=False,
     help="Whether to overlay sparse depth maps on inferenced depth maps.",
@@ -224,7 +224,7 @@ def main(
     interp_mode: str,
     loss_funcs: list[str],
     predict_normed: bool,
-    overlay_sparse_depth: bool,
+    overlay_sparse: bool,
     aa: bool,
     opt: str,
     lr_latent: float,
@@ -464,7 +464,7 @@ def main(
             depth *= max_distance
 
         # Overlay sparse depth map on inferenced depth map
-        if overlay_sparse_depth:
+        if overlay_sparse:
             mask = depth > 0
             depth_pred[mask] = depth[mask]
 
