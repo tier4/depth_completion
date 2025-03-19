@@ -30,7 +30,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
 )
 @click.argument(
-    "depth_dir",
+    "sparse_dir",
     type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
 )
 @click.argument("out_dir", type=click.Path(exists=False, path_type=Path))
@@ -88,13 +88,13 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     type=bool,
     default=True,
     show_default=True,
-    help="Whether to save visualization of output depth maps.",
+    help="Whether to save visualization of inferenced dense depth maps.",
 )
 @click.option(
     "--save-depth",
     type=bool,
     default=True,
-    help="Whether to save the inferenced depth maps. "
+    help="Whether to save the inferenced dense depth maps. "
     "Output format can be specified with --compress.",
     show_default=True,
 )
@@ -165,7 +165,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     "--predict-normed",
     type=bool,
     default=False,
-    help="Whether to predict depth maps in normalized [0, 1] range.",
+    help="Whether to predict dense depth maps in normalized [0, 1] range.",
     show_default=True,
 )
 @click.option(
@@ -173,7 +173,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     type=bool,
     default=False,
     help="Whether to overlay sparse depth maps on visualization of "
-    "inferenced depth maps. Saved inferenced depth maps are not affected.",
+    "dense depth maps. Saved dense depth maps are not affected.",
     show_default=True,
 )
 @click.option(
@@ -206,7 +206,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 )
 def main(
     img_dir: Path,
-    depth_dir: Path,
+    sparse_dir: Path,
     out_dir: Path,
     seg_dir: Path | None,
     model: str,
@@ -277,7 +277,7 @@ def main(
     img_paths_all.sort(key=lambda x: x.name)
 
     # Get paths of input depth images and optionally segmentation maps
-    depth_paths: list[Path] = []
+    sparse_paths: list[Path] = []
     img_paths: list[Path] = []
     seg_paths: list[Path] = []
     for path in img_paths_all:
@@ -285,7 +285,7 @@ def main(
             filter(
                 lambda p: p.exists(),
                 [
-                    depth_dir / path.relative_to(img_dir).with_suffix(ext)
+                    sparse_dir / path.relative_to(img_dir).with_suffix(ext)
                     for ext in NPARRAY_EXTENSIONS
                 ],
             )
@@ -307,12 +307,12 @@ def main(
                 logger.warning(f"No segmentation map found for image{path} (skipped)")
                 continue
             seg_paths.append(seg_path_candidates[0])
-        depth_paths.append(depth_path_candidates[0])
+        sparse_paths.append(depth_path_candidates[0])
         img_paths.append(path)
     if len(img_paths) == 0:
         logger.critical("No valid input found")
         sys.exit(1)
-    logger.info(f"Found {len(depth_paths):,} input pairs")
+    logger.info(f"Found {len(sparse_paths):,} input pairs")
 
     # Create output directory if it doesn't exist
     if not out_dir.exists():
@@ -371,11 +371,12 @@ def main(
     )
 
     # Evaluation loop
-    for i, (img_path, depth_path) in enumerate(
-        zip(img_paths, depth_paths, strict=True)
+    for i, (img_path, sparse_path) in enumerate(
+        zip(img_paths, sparse_paths, strict=True)
     ):
         logger.info(
-            f"[{i+1:,} / {len(img_paths):,}] " f"Processing {img_path} and {depth_path}"
+            f"[{i+1:,} / {len(img_paths):,}] "
+            f"Processing {img_path} and {sparse_path}"
         )
 
         # Load camera image
@@ -385,28 +386,28 @@ def main(
             continue
 
         # Load depth map
-        depth = utils.load_array(depth_path)
+        sparse = utils.load_array(sparse_path)
         if predict_normed:
-            depth /= max_distance
+            sparse /= max_distance
 
         # Load segmentation map
         seg: np.ndarray | None = None
         if seg_dir is not None:
             seg = utils.load_array(seg_paths[i])
-            if seg.shape != depth.shape:
+            if seg.shape != sparse.shape:
                 logger.error(
                     f"Shape of segmentation map {seg_paths[i]} does not match "
-                    f"shape of depth map {depth_path}. "
+                    f"shape of sparse depth map {sparse_path}. "
                     f"Segmentation map will be ignored."
                 )
                 seg = None
 
-        # Add guides to depth map using segmentation map
+        # Add guides to sparse depth map using segmentation map
         if seg is not None:
             # Set sky pixels to max distance
-            depth_src = depth.copy()
+            sparse_src = sparse.copy()
             if "sky" in seg_ids:
-                depth[(seg == seg_ids["sky"]) & (depth_src <= 0)] = max_distance
+                sparse[(seg == seg_ids["sky"]) & (sparse_src <= 0)] = max_distance
             # Complete missing depth values using segmentation map for specific classes
             for class_name in [
                 "ego_vehicle",
@@ -417,10 +418,10 @@ def main(
                 if class_name not in seg_ids:
                     continue
                 seg_mask = seg == seg_ids[class_name]
-                seg_mask_with_sparse_depth = (depth_src > 0) & seg_mask
+                seg_mask_with_sparse_depth = (sparse_src > 0) & seg_mask
 
                 # Calculate sum of depth values for each row where mask is True
-                row_sums = np.sum(depth_src * seg_mask_with_sparse_depth, axis=-1)
+                row_sums = np.sum(sparse_src * seg_mask_with_sparse_depth, axis=-1)
 
                 # Count number of valid depth points in each row
                 row_counts = np.sum(seg_mask_with_sparse_depth, axis=-1)
@@ -429,23 +430,21 @@ def main(
                 safe_counts = np.maximum(row_counts, 1)
 
                 # Calculate average of non-zero depth values for each row
-                completion_depth_values = row_sums / safe_counts
+                completion_values = row_sums / safe_counts
 
                 # Only use average values where we had at least one valid depth point
-                completion_depth_values = np.where(
-                    row_counts > 0, completion_depth_values, 0
-                )
+                completion_values = np.where(row_counts > 0, completion_values, 0)
 
                 # Update depth map
-                for y in range(completion_depth_values.shape[0]):
-                    if completion_depth_values[y] > 0:
-                        depth[y, seg_mask[y]] = completion_depth_values[y]
+                for y in range(completion_values.shape[0]):
+                    if completion_values[y] > 0:
+                        sparse[y, seg_mask[y]] = completion_values[y]
 
         # Run inference
         start = time.time()
-        depth_pred: np.ndarray = pipe(
+        dense: np.ndarray = pipe(
             img,
-            depth,
+            sparse,
             steps=steps,
             resolution=res,
             elemwise_scaling=elemwise_scaling,
@@ -457,12 +456,12 @@ def main(
         )
         end = time.time()
         logger.info(f"Inference time: {end - start:.3f} [s]")
-        if utils.has_nan(depth_pred):
-            logger.error("NaN values found in inferenced depth map (skipped)")
+        if utils.has_nan(dense):
+            logger.error("NaN values found in dense depth map (skipped)")
             continue
         if predict_normed:
-            depth_pred *= max_distance
-            depth *= max_distance
+            dense *= max_distance
+            sparse *= max_distance
 
         # Save inferenced depth map
         if save_depth:
@@ -474,30 +473,30 @@ def main(
             else:
                 save_path = save_dir / img_path.with_suffix(".npy").name
             utils.save_array(
-                depth_pred,
+                dense,
                 save_path,
                 compress=compress if compress != "none" else None,
             )
-            logger.info(f"Saved inferenced depth map at {save_path}")
+            logger.info(f"Saved dense depth map at {save_path}")
 
         # Save visualization of inferenced depth map
         if vis:
-            depth_vis = pipe.image_processor.visualize_depth(
-                depth, val_min=0, val_max=max_distance
+            sparse_vis = pipe.image_processor.visualize_depth(
+                sparse, val_min=0, val_max=max_distance
             )[0]
-            depth_vis = np.array(depth_vis)
-            depth_vis[depth <= 0] = 0
-            # Overlay sparse depth map on inferenced depth map
+            sparse_vis = np.array(sparse_vis)
+            sparse_vis[sparse <= 0] = 0
+            # Overlay sparse depth map on visualization of dense depth map
             if overlay_sparse:
-                mask = depth > 0
-                depth_pred[mask] = depth[mask]
-            depth_pred_vis = pipe.image_processor.visualize_depth(
-                depth_pred, val_min=0, val_max=max_distance
+                mask = sparse > 0
+                dense[mask] = sparse[mask]
+            dense_vis = pipe.image_processor.visualize_depth(
+                dense, val_min=0, val_max=max_distance
             )[0]
             out = Image.fromarray(
                 utils.make_grid(
                     np.stack(
-                        [img, depth_vis, depth_pred_vis],
+                        [img, sparse_vis, dense_vis],
                         axis=0,
                     ),
                     rows=1,
@@ -509,7 +508,7 @@ def main(
                 save_dir.mkdir(parents=True)
             save_path = save_dir / f"{img_path.stem}_vis.jpg"
             out.save(save_path)
-            logger.info(f"Saved visualized outputs at {save_path}")
+            logger.info(f"Saved visualization of dense depth map at {save_path}")
     logger.success(f"Finished processing {len(img_paths):,} input pairs")
 
 
