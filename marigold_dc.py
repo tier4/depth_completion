@@ -138,6 +138,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         interp_mode: str = "bilinear",
         loss_funcs: list[str] | None = None,
         aa: bool = False,
+        opt: str = "adam",
+        lr: tuple[float, float] | None = None,
     ) -> np.ndarray:
         """
         Perform depth completion on an RGB image using sparse depth measurements.
@@ -163,6 +165,10 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 Defaults to ["l1", "l2"].
             aa (bool, optional): Whether to enable anti-aliasing during processing.
                 Defaults to False.
+            opt (str, optional): Optimizer to use for depth completion.
+                Options are "adam", "adamw", or "sgd". Defaults to "adam".
+            lr (tuple[float, float], optional): Learning rates for (latent, scaling).
+                Defaults to (0.05, 0.005).
 
         Returns:
             np.ndarray: Dense depth prediction of shape [H, W].
@@ -177,6 +183,13 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 "Sparse depth map must be a 2d numpy "
                 "array with zeros at missing positions"
             )
+
+        # Set learning rates
+        if lr is None:
+            lr_latent = 0.05
+            lr_scaling = 0.005
+        else:
+            lr_latent, lr_scaling = lr
 
         # Set loss functions
         if loss_funcs is None:
@@ -240,12 +253,19 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         sparse_range = sparse_max - sparse_min
 
         # Set up optimizer
-        optimizer = torch.optim.Adam(
-            [
-                {"params": [scale, shift], "lr": 0.005},
-                {"params": [pred_latent], "lr": 0.05},
-            ]
-        )
+        optimizer: torch.optim.Optimizer
+        param_groups = [
+            {"params": [scale, shift], "lr": lr_scaling},
+            {"params": [pred_latent], "lr": lr_latent},
+        ]
+        if opt == "adam":
+            optimizer = torch.optim.Adam(param_groups)
+        elif opt == "adamw":
+            optimizer = torch.optim.AdamW(param_groups)
+        elif opt == "sgd":
+            optimizer = torch.optim.SGD(param_groups)
+        else:
+            raise ValueError(f"Unknown optimizer: {opt}")
 
         def affine_to_metric(depth: torch.Tensor) -> torch.Tensor:
             return (scale**2) * sparse_range * depth + (shift**2) * sparse_min

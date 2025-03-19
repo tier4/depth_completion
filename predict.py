@@ -182,6 +182,27 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     help="Whether to enable anti-aliasing during depth completion.",
     show_default=True,
 )
+@click.option(
+    "--opt",
+    type=click.Choice(["adam", "adamw", "sgd"]),
+    default="adam",
+    help="Optimizer to use for depth completion.",
+    show_default=True,
+)
+@click.option(
+    "--lr-latent",
+    type=click.FloatRange(min=0, min_open=True),
+    default=0.05,
+    help="Learning rate for latent variable.",
+    show_default=True,
+)
+@click.option(
+    "--lr-scaling",
+    type=click.FloatRange(min=0, min_open=True),
+    default=0.005,
+    show_default=True,
+    help="Learning rate for scale and shift parameters.",
+)
 def main(
     img_dir: Path,
     depth_dir: Path,
@@ -205,6 +226,9 @@ def main(
     predict_normed: bool,
     overlay_sparse_depth: bool,
     aa: bool,
+    opt: str,
+    lr_latent: float,
+    lr_scaling: float,
 ) -> None:
     # Set log level
     logger.remove()
@@ -427,6 +451,8 @@ def main(
             interp_mode=interp_mode,
             loss_funcs=loss_funcs,
             aa=aa,
+            opt=opt,
+            lr=(lr_latent, lr_scaling),
         )
         end = time.time()
         logger.info(f"Inference time: {end - start:.3f} [s]")
