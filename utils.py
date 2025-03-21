@@ -225,7 +225,7 @@ def infer_camera_category(img_path: Path) -> str | None:
 
     Returns:
         str | None: The inferred camera category if found in the filename, None otherwise
-    """
+    """  # noqa: E501
     for category in CAMERA_CATEGORIES:
         if category in img_path.name:
             return category
@@ -241,7 +241,7 @@ def mae(preds: np.ndarray, depth: np.ndarray, mask: np.ndarray | None = None) ->
         mask (np.ndarray | None, optional): Mask to apply to the depth maps.
     Returns:
         float: Mean absolute error between the two depth maps
-    """
+    """  # noqa: E501
     if mask is not None:
         preds = preds[mask]
         depth = depth[mask]
@@ -258,7 +258,7 @@ def rmse(preds: np.ndarray, depth: np.ndarray, mask: np.ndarray | None = None) -
 
     Returns:
         float: Root mean squared error between the two depth maps
-    """
+    """  # noqa: E501
     if mask is not None:
         preds = preds[mask]
         depth = depth[mask]
@@ -302,7 +302,7 @@ class CommaSeparated(click.ParamType):
             def cmd(weights):
                 # --weights "0.1,0.2,0.7" -> [0.1, 0.2, 0.7]
                 pass
-    """
+    """  # noqa: E501
 
     name = "comma_separated"
 
@@ -348,7 +348,7 @@ def is_empty_img(img: Image.Image) -> bool:
 
     Returns:
         bool: True if image is empty (all values are 0), False otherwise
-    """
+    """  # noqa: E501
     return not np.any(np.array(img))
 
 
@@ -375,7 +375,7 @@ def load_img(path: Path, mode: str | None = None) -> tuple[np.ndarray, bool]:
         >>> img, is_valid = load_img(Path("image.jpg"), mode="RGB")
         >>> # Load grayscale image
         >>> img, is_valid = load_img(Path("depth.png"), mode="L")
-    """
+    """  # noqa: E501
     img_pil = Image.open(path)
     if mode is not None:
         img_pil = img_pil.convert(mode)
@@ -435,7 +435,7 @@ def make_grid(
         >>> grid = make_grid(images, resize=(512,512))
         >>> # Create grid with different interpolation per image
         >>> grid = make_grid(images, interpolation=[cv2.INTER_LINEAR, cv2.INTER_NEAREST])
-    """
+    """  # noqa: E501
     if imgs.size == 0 or len(imgs.shape) != 4:
         raise ValueError("Images must be non-empty 4D array (N,H,W,C)")
 
@@ -495,7 +495,7 @@ def has_nan(x: np.ndarray) -> bool:
 
     Returns:
         bool: True if array contains NaN values, False otherwise
-    """
+    """  # noqa: E501
     return np.isnan(x).any()
 
 
@@ -525,7 +525,7 @@ def reduce(x: np.ndarray, method: str, axis: int | None = None) -> float:
         3.5
         >>> reduce(x, "max", axis=0)  # Max along first axis
         array([4., 5., 6.])
-    """
+    """  # noqa: E501
     if method == "mean":
         return float(np.mean(x, axis=axis))
     elif method == "median":
@@ -557,7 +557,7 @@ def to_depth_map(
 
     Raises:
         ValueError: If input image is not in RGB format
-    """
+    """  # noqa: E501
     if img.mode != "RGB":
         raise ValueError(f"Input image must be RGB format, got {img.mode}")
     return max_distance * np.array(img, dtype=dtype)[..., 0] / 255.0
@@ -572,7 +572,7 @@ def is_img_file(path: Path) -> bool:
     Returns:
         bool: True if path points to a valid image file that can be opened,
               False otherwise
-    """
+    """  # noqa: E501
     return path.is_file() and imagesize.get(path) != (-1, -1)
 
 
@@ -584,5 +584,5 @@ def get_img_paths(root: Path) -> list[Path]:
 
     Returns:
         list[Path]: List of paths to image files
-    """
+    """  # noqa: E501
     return [path for path in root.rglob("*") if is_img_file(path)]
