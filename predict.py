@@ -6,6 +6,7 @@ import click
 import numpy as np
 import torch
 from diffusers import AutoencoderTiny, DDIMScheduler
+from diffusers.models.attention_processor import AttnProcessor, AttnProcessor2_0
 from loguru import logger
 from PIL import Image
 
@@ -204,6 +205,16 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
     help="Learning rate for scale and shift parameters.",
 )
+@click.option(
+    "--attn",
+    type=click.Choice(["1.0", "2.0"]),
+    default="2.0",
+    help="Attention processor. "
+    "1.0 - The legacy attention processor. "
+    "2.0 - The new attention processor from PyTorch 2.0. "
+    "Slightly faster than 1.0.",
+    show_default=True,
+)
 def main(
     img_dir: Path,
     sparse_dir: Path,
@@ -230,6 +241,7 @@ def main(
     opt: str,
     lr_latent: float,
     lr_scaling: float,
+    attn: str,
 ) -> None:
     # Set log level
     logger.remove()
@@ -361,13 +373,29 @@ def main(
         pipe.scheduler.config, timestep_spacing="trailing"
     )
 
+    # Set attention processor
+    # NOTE: AutoEncoderTiny does not implement set_attn_processor method
+    if attn == "2.0":
+        if vae == "original":
+            pipe.vae.set_attn_processor(AttnProcessor2_0())
+        pipe.unet.set_attn_processor(AttnProcessor2_0())
+    else:
+        if vae == "original":
+            pipe.vae.set_attn_processor(AttnProcessor())
+        pipe.unet.set_attn_processor(AttnProcessor())
+
     # Compile model for faster inference
     if use_compile:
         pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead", fullgraph=True)
         pipe.vae = torch.compile(pipe.vae, mode="reduce-overhead", fullgraph=True)
+        logger.warning(
+            "torch.compile is enabled, which takes a long time for "
+            "the first inference path to compile. This is normal and expected"
+        )
     logger.info(
         f"Initialized inference pipeline "
-        f"(dtype={precision}, vae={vae}, model={model}, loss_funcs={loss_funcs})"
+        f"(dtype={precision}, vae={vae}, model={model}, "
+        f"loss_funcs={loss_funcs}, attn={attn})"
     )
 
     # Evaluation loop
