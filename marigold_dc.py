@@ -35,6 +35,25 @@ def compute_loss(
     loss_funcs: list[str],
     image: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Compute loss between predicted and target depth maps for each sample in batch.
+
+    Args:
+        depth_pred (torch.Tensor): Predicted depth maps. Shape: [N, 1, H, W]
+        depth_target (torch.Tensor): Target depth maps. Shape: [N, 1, H, W]
+        loss_funcs (list[str]): List of loss functions to use.
+            Available options: ["l1", "l2", "edge", "smooth"]
+        image (torch.Tensor | None, optional): Input images, required for "edge" and "smooth" losses.
+            Shape: [N, C, H, W] where C is 1 or 3. Defaults to None.
+
+    Returns:
+        torch.Tensor: Computed loss values for each sample. Shape: [N]
+
+    Raises:
+        ValueError: If loss_funcs is empty
+        ValueError: If image is None when using "edge" or "smooth" loss
+        ValueError: If image has invalid number of channels
+        ValueError: If unknown loss function is specified
+    """  # noqa: E501
     # depth_pred: [N, 1, H, W]
     # depth_target: [N, 1, H, W]
     # image: [N, 3, H, W]
@@ -119,18 +138,12 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
     Attributes:
         empty_text_embedding (torch.Tensor): Cached empty text embedding for conditioning
-        tokenizer: Tokenizer for text inputs
-        text_encoder: Text encoder model
-        unet: U-Net model for denoising
-        scheduler: Diffusion scheduler
-        image_processor: Processor for image preprocessing and postprocessing
-        dtype: Data type for model computation
     """
 
     def __call__(
         self,
-        image: np.ndarray,
-        sparse: np.ndarray,
+        image: np.ndarray | torch.Tensor,
+        sparse: np.ndarray | torch.Tensor,
         steps: int = 50,
         resolution: int = 768,
         seed: int = 2024,
@@ -145,8 +158,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         Perform depth completion on an RGB image using sparse depth measurements.
 
         Args:
-            image (np.ndarray): Input RGB image of shape [H, W, C].
-            sparse (np.ndarray): Sparse depth measurements of shape [H, W].
+            image (np.ndarray | torch.Tensor): Input RGB image of shape [H, W, C] or [N, C, H, W].
+            sparse (np.ndarray | torch.Tensor): Sparse depth measurements of shape [H, W] or [N, H, W].
                 Should have zeros at missing positions and positive values at
                 measurement points.
             steps (int, optional): Number of denoising steps.
@@ -171,18 +184,57 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 Defaults to (0.05, 0.005).
 
         Returns:
-            np.ndarray: Dense depth prediction of shape [H, W].
+            np.ndarray: Dense depth prediction of shape [H, W] or [N, H, W].
 
         Raises:
             ValueError: If sparse is not a 2D numpy array.
         """  # noqa: E501
+        # Set device
+        device: torch.device = self._execution_device
 
-        # Check inputs.
-        if sparse.ndim != 2:
+        # Get random generator
+        generator = torch.Generator(device=device).manual_seed(seed)
+
+        # Check inputs
+        is_batched = False
+        if image.ndim == 3:
+            if sparse.ndim != 2:
+                raise ValueError(
+                    "Shape of sparse must be [H, W] if shape of image is [H, W, C], "
+                    f"but got shape of sparse: {sparse.shape}"
+                )
+            # Add batch dimension
+            image = image[None]
+            sparse = sparse[None]
+        elif image.ndim == 4:
+            if sparse.ndim != 3:
+                raise ValueError(
+                    "Shape of sparse must be [N, H, W] if shape of image is "
+                    f"[N, C, H, W], but got shape of sparse: {sparse.shape}"
+                )
+            if image.shape[0] != sparse.shape[0]:
+                raise ValueError(
+                    "Shape of sparse must be [N, H, W] if shape of image is "
+                    f"[N, C, H, W], but got shape of sparse: {sparse.shape}"
+                )
+            is_batched = True
+        else:
             raise ValueError(
-                "Sparse depth map must be a 2d numpy "
-                "array with zeros at missing positions"
+                "Shape of image must be [H, W, C] or [N, C, H, W], "
+                f"but got shape of image: {image.shape}"
             )
+        # Convert to torch tensors if not already
+        if isinstance(image, np.ndarray):
+            image = torch.from_numpy(image).permute(
+                0, 3, 1, 2
+            )  # [N, H, W, C] -> [N, C, H, W]
+        if isinstance(sparse, np.ndarray):
+            sparse = torch.from_numpy(sparse).unsqueeze(1)  # [N, H, W] -> [N, 1, H, W]
+
+        # Move to execution device
+        image = image.to(device, non_blocking=True)
+        sparse = sparse.to(device, non_blocking=True)
+        batch_size = image.shape[0]
 
         # Set learning rates
         if lr is None:
@@ -195,12 +247,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         if loss_funcs is None:
             loss_funcs = ["l1", "l2"]
 
-        # Set device
-        device: torch.device = self._execution_device
-
-        # Get random generator
-        generator = torch.Generator(device=device).manual_seed(seed)
-
         # Prepare empty text conditioning
         if self.empty_text_embedding is None:
             with torch.no_grad():
@@ -211,45 +257,45 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     truncation=True,
                     return_tensors="pt",
                 )
-                text_input_ids = text_inputs.input_ids.to(self._execution_device)
+                text_input_ids = text_inputs.input_ids.to(device)
                 self.empty_text_embedding = self.text_encoder(text_input_ids)[0]
+        batch_empty_text_embedding = self.empty_text_embedding.repeat(batch_size, 1, 1)
 
         # Preprocess input images
         # Convert image to channel-first format (N, C, H, W)
-        image_tensor = torch.from_numpy(image).permute(2, 0, 1).to(device)
-        image_tensor_resized, padding, original_resolution = (
-            self.image_processor.preprocess(
-                image_tensor,
-                processing_resolution=resolution,
-                device=device,
-                dtype=self.dtype,
-            )
+        image_resized, padding, original_resolution = self.image_processor.preprocess(
+            image,
+            processing_resolution=resolution,
+            device=device,
+            dtype=self.dtype,
         )  # (N, 3, PPH, PPW)
 
         # Encode input image into latent space
         with torch.no_grad():
             image_latent, pred_latent = self.prepare_latents(
-                image_tensor_resized, None, generator, 1, 1
-            )  # (N * E, 4, h, w), (N * E, 4, h, w)
+                image_resized, None, generator, 1, 1
+            )  # [N, 4, EH, EW], [N, 4, EH, EW]
 
         # Preprocess sparse depth
-        sparse = torch.from_numpy(sparse)[None, None].float().to(device)
         sparse_mask = sparse > 0
-        guided_points = sparse[sparse_mask]
+        guided = sparse[sparse_mask]
 
         # Set up optimization targets and compute
         # the range and lower bound of the sparse depth
         if elemwise_scaling:
             scale, shift = torch.nn.Parameter(
-                torch.ones(original_resolution, device=device)
-            ), torch.nn.Parameter(torch.ones(original_resolution, device=device))
+                torch.ones(batch_size, 1, *original_resolution, device=device)
+            ), torch.nn.Parameter(
+                torch.ones(batch_size, 1, *original_resolution, device=device)
+            )  # [N, 1, H, W], [N, 1, H, W]
         else:
             scale, shift = torch.nn.Parameter(
-                torch.ones(1, device=device)
-            ), torch.nn.Parameter(torch.ones(1, device=device))
+                torch.ones(batch_size, device=device)
+            ), torch.nn.Parameter(torch.ones(batch_size, device=device))
+            # [N], [N]
         pred_latent = torch.nn.Parameter(pred_latent)
-        sparse_min = guided_points.min()
-        sparse_max = guided_points.max()
+        sparse_min = guided.min()
+        sparse_max = guided.max()
         sparse_range = sparse_max - sparse_min
 
         # Set up optimizer
@@ -271,18 +317,18 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             return (scale**2) * sparse_range * depth + (shift**2) * sparse_min
 
         def latent_to_metric(latent: torch.Tensor) -> torch.Tensor:
-            affine_invariant_pred = self.decode_prediction(latent)  # (E, 1, PPH, PPW)
+            affine_invariant_pred = self.decode_prediction(latent)  # [N, 1, PPH, PPW]
             affine_invariant_pred = self.image_processor.unpad_image(
                 affine_invariant_pred, padding
-            )  # (E, 1, PH, PW)
+            )
             affine_invariant_pred = self.image_processor.resize_antialias(
                 affine_invariant_pred,
                 original_resolution,
                 interp_mode,
                 is_aa=aa,
-            )  # (E, 1, H, W)
+            )  # [N, 1, H, W]
             pred = affine_to_metric(affine_invariant_pred)
-            return pred
+            return pred  # [N, 1, H, W]
 
         # Denoising loop
         self.scheduler.set_timesteps(steps, device=device)
@@ -290,19 +336,23 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             optimizer.zero_grad()
 
             # Forward pass through the U-Net
-            latent = torch.cat([image_latent, pred_latent], dim=1)  # (1, 8, h, w)
-            noise = self.unet(  # (1, 4, h, w)
+            latent = torch.cat([image_latent, pred_latent], dim=1)  # [N, 8, EH, EW]
+            noise = self.unet(
                 latent,
                 t,
-                encoder_hidden_states=self.empty_text_embedding,
+                encoder_hidden_states=batch_empty_text_embedding,
                 return_dict=False,
-            )[0]
+            )[
+                0
+            ]  # [N, 4, EH, EW]
 
             # Compute pred_epsilon to later rescale the depth latent gradient
             with torch.no_grad():
                 a_prod_t = self.scheduler.alphas_cumprod[t]
                 b_prod_t = 1 - a_prod_t
-                pred_epsilon = (a_prod_t**0.5) * noise + (b_prod_t**0.5) * pred_latent
+                pred_epsilon = (a_prod_t**0.5) * noise + (
+                    b_prod_t**0.5
+                ) * pred_latent  # [N, 4, EH, EW]
 
             # Forward denoising step
             step_output = self.scheduler.step(
@@ -311,24 +361,40 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
             # Preview the final output depth with
             # Tweedie's formula (See Equation 1 of the paper)
-            preview = step_output.pred_original_sample
+            preview = step_output.pred_original_sample  # [N, 4, EH, EW]
 
             # Decode to metric space, compute loss with guidance and backpropagate
-            dense = latent_to_metric(preview)
-            loss = compute_loss(
+            dense = latent_to_metric(preview)  # [N, 1, H, W]
+            loss = compute_loss(  # [N]
                 dense,
                 sparse,
                 loss_funcs,
-                image=image_tensor,
+                image=image,
             )
             loss.backward()
 
             # Scale gradients up
             with torch.no_grad():
-                pred_epsilon_norm = torch.linalg.norm(pred_epsilon).item()
-                depth_latent_grad_norm = torch.linalg.norm(pred_latent.grad).item()
-                scaling_factor = pred_epsilon_norm / max(depth_latent_grad_norm, 1e-8)
-                pred_latent.grad *= scaling_factor
+                # Calculate norms per sample in the batch
+                pred_epsilon_norm = torch.linalg.norm(
+                    pred_epsilon.view(batch_size, -1), dim=1
+                )  # [N]
+                depth_latent_grad_norm = torch.linalg.norm(
+                    pred_latent.grad.view(batch_size, -1), dim=1
+                )  # [N]
+
+                # Calculate scaling factor per sample
+                scaling_factor = pred_epsilon_norm / torch.clamp(
+                    depth_latent_grad_norm, min=1e-8
+                )  # [N]
+
+                # Reshape scaling factor for broadcasting
+                scaling_factor = scaling_factor.view(
+                    batch_size, 1, 1, 1
+                )  # [N, 1, 1, 1]
+
+                # Apply per-sample scaling
+                pred_latent.grad *= scaling_factor  # [N, 4, EH, EW]
 
             # Execute the update step through guidance backprop
             optimizer.step()
@@ -345,4 +411,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
         # return Numpy array
         dense = self.image_processor.pt_to_numpy(dense)  # (N, H, W, 1)
-        return dense.squeeze()
+        if is_batched:
+            return np.squeeze(dense, axis=-1)  # [N, H, W]
+        return np.squeeze(dense)  # [H, W]

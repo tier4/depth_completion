@@ -22,6 +22,7 @@ from marigold_dc import (
 )
 from utils import NPARRAY_EXTENSIONS
 
+torch.backends.cudnn.benchmark = True  # NOTE: Optimize convolution algorithms
 torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 
 
@@ -410,17 +411,21 @@ def main(
     )
 
     # Evaluation loop
-    progbar = tqdm.tqdm(total=len(img_paths))
+    progbar = tqdm.tqdm(total=len(img_paths), dynamic_ncols=True)
     postfix: dict[str, Any] = {}
     for i in range(0, len(img_paths), batch_size):
         batch_img_paths = img_paths[i : i + batch_size]
         batch_sparse_paths = sparse_paths[i : i + batch_size]
-        batch_seg_paths = seg_paths[i : i + batch_size] if seg_dir is not None else None
+        batch_seg_paths = seg_paths[i : i + batch_size] if seg_dir is not None else []
+        bs = len(batch_img_paths)
 
         # Load images and arrays
         imgs: list[np.ndarray] = []
         sparses: list[np.ndarray] = []
-        segs: list[np.ndarray] | None = [] if seg_dir is not None else None
+        segs: list[np.ndarray] = []
+        batch_img_paths_: list[Path] = []
+        batch_sparse_paths_: list[Path] = []
+        batch_seg_paths_: list[Path] = []
         time_disk = 0.0
         stime = time.time()
         for j in range(len(batch_img_paths)):
@@ -429,31 +434,46 @@ def main(
             if not is_valid:
                 logger.error(f"Empty input image found: {batch_img_paths[j]} (skipped)")
                 continue
+            imgs.append(img)
+            batch_img_paths_.append(batch_img_paths[j])
             # Load sparse map
             sparse = utils.load_array(batch_sparse_paths[j])
-            if normed:
-                sparse /= max_distance
-            # Load segmentation map
-            if batch_seg_paths is not None:
-                seg = utils.load_array(batch_seg_paths[j])
-            # Add to lists
-            imgs.append(img)
             sparses.append(sparse)
-            if segs is not None:
+            batch_sparse_paths_.append(batch_sparse_paths[j])
+            # Load segmentation map
+            if len(batch_seg_paths) > 0:
+                seg = utils.load_array(batch_seg_paths[j])
                 segs.append(seg)
-        time_disk += time.time() - stime
+                batch_seg_paths_.append(batch_seg_paths[j])
+        batch_img_paths = batch_img_paths_
+        batch_sparse_paths = batch_sparse_paths_
+        batch_seg_paths = batch_seg_paths_
 
         # Skip to the next batch if all images are invalid
         if len(imgs) == 0:
-            progbar.update(len(batch_img_paths))
+            progbar.update(bs)
             continue
 
+        # Make batch arrays
+        batch_imgs = np.stack(imgs, axis=0)
+        batch_sparses = np.stack(sparses, axis=0)
+        if normed:
+            batch_sparses /= max_distance
+        if len(segs) > 0:
+            batch_segs = np.stack(segs, axis=0)
+        time_disk += time.time() - stime
+
         # Add guides to sparse depth map using segmentation map
+        # TODO: Eliminate for loop over batch dimension
         time_guides = 0.0
-        if segs is not None and batch_seg_paths is not None:
+        if seg_dir is not None:
             stime = time.time()
             for sparse, seg, sparse_path, seg_path in zip(
-                sparses, segs, batch_sparse_paths, batch_seg_paths, strict=True
+                batch_sparses,
+                batch_segs,
+                batch_sparse_paths,
+                batch_seg_paths,
+                strict=True,
             ):
                 if sparse.shape != seg.shape:
                     logger.error(
@@ -504,35 +524,31 @@ def main(
 
         # Run inference
         stime = time.time()
-        denses: list[np.ndarray] = []
-        for img, sparse in zip(imgs, sparses, strict=True):
-            denses.append(
-                pipe(
-                    img,
-                    sparse,
-                    steps=steps,
-                    resolution=res,
-                    elemwise_scaling=elemwise_scaling,
-                    interp_mode=interp_mode,
-                    loss_funcs=loss_funcs,
-                    aa=aa,
-                    opt=opt,
-                    lr=(lr_latent, lr_scaling),
-                )
-            )
+        batch_denses: np.ndarray = pipe(
+            batch_imgs,
+            batch_sparses,
+            steps=steps,
+            resolution=res,
+            elemwise_scaling=elemwise_scaling,
+            interp_mode=interp_mode,
+            loss_funcs=loss_funcs,
+            aa=aa,
+            opt=opt,
+            lr=(lr_latent, lr_scaling),
+        )
+        if normed:
+            batch_denses *= max_distance
+            batch_sparses *= max_distance
         postfix["time/infer"] = time.time() - stime
 
         # Iterate over each dense maps
         time_vis = 0.0
         for dense, sparse, img_path in zip(
-            denses, sparses, batch_img_paths, strict=True
+            batch_denses, batch_sparses, batch_img_paths, strict=True
         ):
             if utils.has_nan(dense):
                 logger.error("NaN values found in dense depth map (skipped)")
                 continue
-            if normed:
-                dense *= max_distance
-                sparse *= max_distance
 
             # Save inferenced depth map
             if save_depth:
@@ -587,7 +603,7 @@ def main(
         postfix["time/disk"] = time_disk
         postfix["time/vis"] = time_vis
         progbar.set_postfix(postfix)
-        progbar.update(len(batch_img_paths))
+        progbar.update(bs)
     logger.success(f"Finished processing {len(img_paths):,} input pairs")
 
 
