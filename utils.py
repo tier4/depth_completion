@@ -376,7 +376,7 @@ def load_img(path: Path, mode: str | None = None) -> tuple[np.ndarray, bool]:
         >>> # Load grayscale image
         >>> img, is_valid = load_img(Path("depth.png"), mode="L")
     """  # noqa: E501
-    img_pil = Image.open(path)
+    img_pil: Image.Image = Image.open(path)
     if mode is not None:
         img_pil = img_pil.convert(mode)
     img = np.array(img_pil)
@@ -442,7 +442,8 @@ def make_grid(
     n = imgs.shape[0]
     if isinstance(interpolation, Sequence) and len(interpolation) != n:
         raise ValueError(
-            f"Interpolation list length ({len(interpolation)}) must match number of images ({n})"
+            f"Interpolation list length ({len(interpolation)}) "
+            "must match number of images ({n})"
         )
 
     # Calculate grid dimensions
