@@ -543,8 +543,8 @@ def main(
 
         # Iterate over each dense maps
         time_vis = 0.0
-        for dense, sparse, img_path in zip(
-            batch_denses, batch_sparses, batch_img_paths, strict=True
+        for dense, sparse, img_path, img in zip(
+            batch_denses, batch_sparses, batch_img_paths, batch_imgs, strict=True
         ):
             if utils.has_nan(dense):
                 logger.error("NaN values found in dense depth map (skipped)")
