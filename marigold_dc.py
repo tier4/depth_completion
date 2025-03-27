@@ -315,12 +315,12 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             scale, shift = torch.nn.Parameter(
                 torch.ones(batch_size, 1, *original_resolution, device=device)
             ), torch.nn.Parameter(
-                torch.ones(batch_size, 1, *original_resolution, device=device)
+                torch.zeros(batch_size, 1, *original_resolution, device=device)
             )  # [N, 1, H, W], [N, 1, H, W]
         else:
             scale, shift = torch.nn.Parameter(
                 torch.ones(batch_size, 1, 1, 1, device=device)
-            ), torch.nn.Parameter(torch.ones(batch_size, 1, 1, 1, device=device))
+            ), torch.nn.Parameter(torch.zeros(batch_size, 1, 1, 1, device=device))
             # [N, 1, 1, 1], [N, 1, 1, 1]
 
         # Set up optimizer
