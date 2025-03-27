@@ -35,51 +35,63 @@ def compute_loss(
     loss_funcs: list[str],
     image: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Compute loss between predicted and target depth maps for each sample in batch.
+    """Compute per-sample losses between predicted and target depth maps.
+
+    This function computes multiple types of losses between predicted and target depth maps,
+    maintaining independence between samples in the batch. Each loss is computed separately
+    for each sample without any batch-wise averaging.
 
     Args:
         depth_pred (torch.Tensor): Predicted depth maps. Shape: [N, 1, H, W]
-        depth_target (torch.Tensor): Target depth maps. Shape: [N, 1, H, W]
+        depth_target (torch.Tensor): Target depth maps with sparse values.
+            Shape: [N, 1, H, W]. Zero values indicate missing measurements.
         loss_funcs (list[str]): List of loss functions to use.
             Available options: ["l1", "l2", "edge", "smooth"]
+            - l1: Mean absolute error for valid depth points
+            - l2: Mean squared error for valid depth points
+            - edge: Gradient similarity between depth and image edges
+            - smooth: Spatial smoothness of the depth map
         image (torch.Tensor | None, optional): Input images, required for "edge" and "smooth" losses.
             Shape: [N, C, H, W] where C is 1 or 3. Defaults to None.
 
     Returns:
-        torch.Tensor: Computed loss values for each sample. Shape: [N]
+        torch.Tensor: Per-sample loss values. Shape: [N]
+            Each element represents the total loss for that sample,
+            computed as the sum of all specified loss functions.
 
     Raises:
         ValueError: If loss_funcs is empty
         ValueError: If image is None when using "edge" or "smooth" loss
         ValueError: If image has invalid number of channels
         ValueError: If unknown loss function is specified
-    """  # noqa: E501
-    # depth_pred: [N, 1, H, W]
-    # depth_target: [N, 1, H, W]
-    # image: [N, 3, H, W]
+    """
     if len(loss_funcs) == 0:
         raise ValueError("loss_funcs must contain at least one loss function")
-    total = torch.tensor(0.0, device=depth_pred.device)
+    total = torch.zeros(depth_pred.shape[0], device=depth_pred.device)  # [N]
     sparse_mask = depth_target > 0
+
     for loss_func in loss_funcs:
         if loss_func == "l1":
-            # Normal l1 loss function
-            total += torch.nn.functional.l1_loss(
-                depth_pred[sparse_mask], depth_target[sparse_mask]
-            )
+            # Compute L1 loss per sample using masked operations
+            l1_loss = torch.abs(depth_pred - depth_target)
+            l1_loss = l1_loss * sparse_mask  # Apply mask
+            # Sum over HW dimensions and divide by number of valid points per sample
+            total += l1_loss.sum(dim=(1, 2, 3)) / sparse_mask.sum(dim=(1, 2, 3))
+
         elif loss_func == "l2":
-            # Normal l2 loss function
-            total += torch.nn.functional.mse_loss(
-                depth_pred[sparse_mask], depth_target[sparse_mask]
-            )
+            # Compute L2 loss per sample using masked operations
+            l2_loss = (depth_pred - depth_target) ** 2
+            l2_loss = l2_loss * sparse_mask  # Apply mask
+            # Sum over HW dimensions and divide by number of valid points per sample
+            total += l2_loss.sum(dim=(1, 2, 3)) / sparse_mask.sum(dim=(1, 2, 3))
+
         elif loss_func == "edge":
-            # Edge-preserving loss function using gradients
-            # of predicted depth and input image
             if image is None:
                 raise ValueError("image must be provided for edge loss")
+
+            # Convert to grayscale if needed
             num_channels = image.shape[1]
             if num_channels == 3:
-                # Convert image to grayscale
                 gray_image = (
                     0.299 * image[:, 0:1]
                     + 0.587 * image[:, 1:2]
@@ -89,35 +101,35 @@ def compute_loss(
                 gray_image = image
             else:
                 raise ValueError(f"Image must have 1 or 3 channels, got {num_channels}")
-            # Gradients of depth map in x and y directions
+
+            # Compute gradients for entire batch at once
             grad_pred_x = torch.abs(depth_pred[:, :, :, :-1] - depth_pred[:, :, :, 1:])
             grad_pred_y = torch.abs(depth_pred[:, :, :-1, :] - depth_pred[:, :, 1:, :])
-
-            # Gradients of image (grayscale) in x and y directions
             grad_gray_x = torch.abs(gray_image[:, :, :, :-1] - gray_image[:, :, :, 1:])
             grad_gray_y = torch.abs(gray_image[:, :, :-1, :] - gray_image[:, :, 1:, :])
 
-            # The more similar the gradients of depth and image are,
-            # the more aligned the edges are considered to be
-            loss = torch.mean(torch.abs(grad_pred_x - grad_gray_x)) + torch.mean(
-                torch.abs(grad_pred_y - grad_gray_y)
-            )
-            total += loss
+            # Compute edge loss per sample using reduction over spatial dimensions
+            edge_loss_x = torch.abs(grad_pred_x - grad_gray_x).mean(dim=(1, 2, 3))
+            edge_loss_y = torch.abs(grad_pred_y - grad_gray_y).mean(dim=(1, 2, 3))
+            total += edge_loss_x + edge_loss_y
+
         elif loss_func == "smooth":
-            # Smoothness loss function
-            # of predicted depth and input image
             if image is None:
                 raise ValueError("image must be provided for smooth loss")
-            loss_h = torch.mean(
-                torch.abs(depth_pred[:, :, :-1, :] - depth_pred[:, :, 1:, :])
+
+            # Compute smoothness loss per sample using reduction over spatial dimensions
+            loss_h = torch.abs(depth_pred[:, :, :-1, :] - depth_pred[:, :, 1:, :]).mean(
+                dim=(1, 2, 3)
             )
-            loss_w = torch.mean(
-                torch.abs(depth_pred[:, :, :, :-1] - depth_pred[:, :, :, 1:])
+            loss_w = torch.abs(depth_pred[:, :, :, :-1] - depth_pred[:, :, :, 1:]).mean(
+                dim=(1, 2, 3)
             )
             total += loss_h + loss_w
+
         else:
             raise ValueError(f"Unknown loss function: {loss_func}")
-    return total
+
+    return total  # Returns tensor of shape [N]
 
 
 class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
@@ -365,13 +377,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
             # Decode to metric space, compute loss with guidance and backpropagate
             dense = latent_to_metric(preview)  # [N, 1, H, W]
-            loss = compute_loss(  # [N]
-                dense,
-                sparse,
-                loss_funcs,
-                image=image,
-            )
-            loss.backward()
+            loss = compute_loss(dense, sparse, loss_funcs, image=image)
+            loss.backward(torch.ones_like(loss))  # Preserve batch dimension
 
             # Scale gradients up
             with torch.no_grad():
