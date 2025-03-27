@@ -252,8 +252,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             sparse = torch.from_numpy(sparse).unsqueeze(1)  # [N, H, W] -> [N, 1, H, W]
 
         # Move to execution device
-        image = image.to(device, non_blocking=True)
-        sparse = sparse.to(device, non_blocking=True)
+        image = image.to(device, non_blocking=True)  # [N, C, H, W]
+        sparse = sparse.to(device, non_blocking=True)  # [N, 1, H, W]
         batch_size = image.shape[0]
 
         # Set learning rates
@@ -298,7 +298,16 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
         # Preprocess sparse depth
         sparse_mask = sparse > 0
-        guided = sparse[sparse_mask]
+        pred_latent = torch.nn.Parameter(pred_latent)
+
+        # Calculate min, max, and range for each sample in the batch [N] -> [N,1,1,1]
+        sparse_min = torch.stack(
+            [s[m].min() for s, m in zip(sparse, sparse_mask, strict=False)]
+        ).view(-1, 1, 1, 1)
+        sparse_max = torch.stack(
+            [s[m].max() for s, m in zip(sparse, sparse_mask, strict=False)]
+        ).view(-1, 1, 1, 1)
+        sparse_range = sparse_max - sparse_min
 
         # Set up optimization targets and compute
         # the range and lower bound of the sparse depth
@@ -310,13 +319,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             )  # [N, 1, H, W], [N, 1, H, W]
         else:
             scale, shift = torch.nn.Parameter(
-                torch.ones(batch_size, device=device)
-            ), torch.nn.Parameter(torch.ones(batch_size, device=device))
-            # [N], [N]
-        pred_latent = torch.nn.Parameter(pred_latent)
-        sparse_min = guided.min()
-        sparse_max = guided.max()
-        sparse_range = sparse_max - sparse_min
+                torch.ones(batch_size, 1, 1, 1, device=device)
+            ), torch.nn.Parameter(torch.ones(batch_size, 1, 1, 1, device=device))
+            # [N, 1, 1, 1], [N, 1, 1, 1]
 
         # Set up optimizer
         optimizer: torch.optim.Optimizer
