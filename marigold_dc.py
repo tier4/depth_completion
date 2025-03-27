@@ -149,7 +149,15 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
     4. Iteratively refining the prediction through a guided diffusion process
 
     Attributes:
+        unet (UNet2DConditionModel): U-Net model for diffusion process
+        vae (AutoencoderKL): Variational autoencoder for encoding/decoding images
+        scheduler (DDIMScheduler): Scheduler for the diffusion process
+        text_encoder (CLIPTextModel): Text encoder for conditioning
+        tokenizer (CLIPTokenizer): Tokenizer for text inputs
+        image_processor (MarigoldImageProcessor): Processor for image preprocessing
         empty_text_embedding (torch.Tensor): Cached empty text embedding for conditioning
+        dtype (torch.dtype): Data type for model computation
+        _execution_device (torch.device): Device for model execution
     """
 
     def __call__(
@@ -285,7 +293,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         # Encode input image into latent space
         with torch.no_grad():
             image_latent, pred_latent = self.prepare_latents(
-                image_resized, None, generator, 1, 1
+                image_resized, None, generator, 1, batch_size
             )  # [N, 4, EH, EW], [N, 4, EH, EW]
 
         # Preprocess sparse depth
