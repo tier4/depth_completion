@@ -302,10 +302,10 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
         # Calculate min, max, and range for each sample in the batch [N] -> [N,1,1,1]
         sparse_min = torch.stack(
-            [s[m].min() for s, m in zip(sparse, sparse_mask, strict=False)]
+            [s[m].min() for s, m in zip(sparse, sparse_mask, strict=True)]
         ).view(-1, 1, 1, 1)
         sparse_max = torch.stack(
-            [s[m].max() for s, m in zip(sparse, sparse_mask, strict=False)]
+            [s[m].max() for s, m in zip(sparse, sparse_mask, strict=True)]
         ).view(-1, 1, 1, 1)
         sparse_range = sparse_max - sparse_min
 

@@ -475,7 +475,7 @@ def make_grid(
             imgs = np.array(
                 [
                     cv2.resize(img, (w, h), interpolation=method)
-                    for img, method in zip(imgs, methods, strict=False)
+                    for img, method in zip(imgs, methods, strict=True)
                 ]
             )
 
