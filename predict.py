@@ -95,6 +95,16 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     help="Whether to save visualization of inferenced dense depth maps.",
 )
 @click.option(
+    "-vr",
+    "--vis-range",
+    type=click.Choice(["abs", "rel"]),
+    default="abs",
+    help="Range of visualization of inferenced dense depth maps. "
+    "abs - [0, --max-distance]. "
+    "rel - [min(dense.min(), sparse.min()), max(dense.max(), sparse.max())].",
+    show_default=True,
+)
+@click.option(
     "--save-depth",
     type=bool,
     default=True,
@@ -253,6 +263,7 @@ def main(
     lr_latent: float,
     lr_scaling: float,
     attn: str,
+    vis_range: str,
     batch_size: int,
 ) -> None:
     # Set log level
@@ -569,9 +580,15 @@ def main(
 
             # Save visualization of inferenced depth map
             if vis:
+                if vis_range == "abs":
+                    vis_min, vis_max = 0, max_distance
+                else:
+                    vis_min, vis_max = min(dense.min(), sparse.min()), max(
+                        dense.max(), sparse.max()
+                    )
                 stime = time.time()
                 sparse_vis = pipe.image_processor.visualize_depth(
-                    sparse, val_min=0, val_max=max_distance
+                    sparse, val_min=vis_min, val_max=vis_max
                 )[0]
                 sparse_vis = np.array(sparse_vis)
                 sparse_vis[sparse <= 0] = 0
@@ -580,7 +597,7 @@ def main(
                     mask = sparse > 0
                     dense[mask] = sparse[mask]
                 dense_vis = pipe.image_processor.visualize_depth(
-                    dense, val_min=0, val_max=max_distance
+                    dense, val_min=vis_min, val_max=vis_max
                 )[0]
                 out = Image.fromarray(
                     utils.make_grid(
