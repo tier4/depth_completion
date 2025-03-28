@@ -198,7 +198,7 @@ def depth_img2array(
             continue
 
         # Convert depth image to depth array
-        depth_array = depth_img.astype(np.float32) / max_distance
+        depth_array = utils.to_depth_map(depth_img, max_distance=max_distance)
 
         # Save depth array
         save_dir = out_dir / (depth_img_path.relative_to(depth_img_dir)).parent

@@ -542,12 +542,12 @@ def reduce(x: np.ndarray, method: str, axis: int | None = None) -> float:
 
 
 def to_depth_map(
-    img: Image.Image, dtype: str = "float32", max_distance: float = 120.0
+    img: np.ndarray, dtype: str = "float32", max_distance: float = 120.0
 ) -> np.ndarray:
-    """Convert a PIL Image to a depth map.
+    """Convert an RGB image array to a depth map.
 
     Args:
-        img (Image.Image): Input PIL image
+        img (np.ndarray): Input image array in RGB format
         dtype (str, optional): Data type for output array. Defaults to "float32".
         max_distance (float, optional): Maximum depth value in meters.
                                         Defaults to 120.0.
@@ -555,12 +555,8 @@ def to_depth_map(
     Returns:
         np.ndarray: Depth map as numpy array with values ranging from 0 to max_distance,
                    where 0 represents the closest depth and max_distance the farthest.
-
-    Raises:
-        ValueError: If input image is not in RGB format
+                   The function uses only the red channel (index 0) of the RGB image.
     """  # noqa: E501
-    if img.mode != "RGB":
-        raise ValueError(f"Input image must be RGB format, got {img.mode}")
     return max_distance * np.array(img, dtype=dtype)[..., 0] / 255.0
 
 
