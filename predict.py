@@ -536,8 +536,8 @@ def main(
         # Run inference
         stime = time.time()
         batch_denses: np.ndarray = pipe(
-            batch_imgs,
-            batch_sparses,
+            np.expand_dims(batch_imgs, axis=1),
+            np.expand_dims(batch_sparses, axis=1),
             steps=steps,
             resolution=res,
             elemwise_scaling=elemwise_scaling,
@@ -546,7 +546,9 @@ def main(
             aa=aa,
             opt=opt,
             lr=(lr_latent, lr_scaling),
-        )
+        )[
+            :, 0
+        ]  # [N, H, W]
         if normed:
             batch_denses *= max_distance
             batch_sparses *= max_distance

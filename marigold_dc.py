@@ -30,57 +30,47 @@ SUPPORTED_LOSS_FUNCS = ["l1", "l2", "edge", "smooth"]
 
 
 def compute_loss(
-    depth_pred: torch.Tensor,
-    depth_target: torch.Tensor,
+    dense: torch.Tensor,
+    sparse: torch.Tensor,
     loss_funcs: list[str],
     image: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Compute per-sample losses between predicted and target depth maps.
-
-    This function computes multiple types of losses between predicted and target depth maps,
-    maintaining independence between samples in the batch. Each loss is computed separately
-    for each sample without any batch-wise averaging.
+    """
+    Computes a combined loss between dense depth predictions and sparse depth measurements.
 
     Args:
-        depth_pred (torch.Tensor): Predicted depth maps. Shape: [N, 1, H, W]
-        depth_target (torch.Tensor): Target depth maps with sparse values.
-            Shape: [N, 1, H, W]. Zero values indicate missing measurements.
-        loss_funcs (list[str]): List of loss functions to use.
-            Available options: ["l1", "l2", "edge", "smooth"]
-            - l1: Mean absolute error for valid depth points
-            - l2: Mean squared error for valid depth points
-            - edge: Gradient similarity between depth and image edges
-            - smooth: Spatial smoothness of the depth map
-        image (torch.Tensor | None, optional): Input images, required for "edge" and "smooth" losses.
-            Shape: [N, C, H, W] where C is 1 or 3. Defaults to None.
+        dense: Predicted dense depth map tensor of shape [N, 1, H, W].
+        sparse: Sparse depth measurements tensor of shape [N, 1, H, W], with zeros at unmeasured points.
+        loss_funcs: List of loss function names to apply. Supported values are:
+                    - "l1": L1 loss between dense and sparse at measured points
+                    - "l2": L2 loss between dense and sparse at measured points
+                    - "edge": Edge-aware loss that compares gradients with image gradients
+                    - "smooth": Smoothness loss (requires image parameter)
+        image: Optional RGB or grayscale image tensor of shape [N, C, H, W] where C is 1 or 3.
+               Required when using "edge" or "smooth" loss functions.
 
     Returns:
-        torch.Tensor: Per-sample loss values. Shape: [N]
-            Each element represents the total loss for that sample,
-            computed as the sum of all specified loss functions.
+        A tensor of shape [N] containing the total loss for each sample in the batch.
 
     Raises:
-        ValueError: If loss_funcs is empty
-        ValueError: If image is None when using "edge" or "smooth" loss
-        ValueError: If image has invalid number of channels
-        ValueError: If unknown loss function is specified
-    """
+        ValueError: If loss_funcs is empty, or if image is not provided when required.
+    """  # noqa: E501
     if len(loss_funcs) == 0:
         raise ValueError("loss_funcs must contain at least one loss function")
-    total = torch.zeros(depth_pred.shape[0], device=depth_pred.device)  # [N]
-    sparse_mask = depth_target > 0
+    total = torch.zeros(dense.shape[0], device=dense.device)  # [N]
+    sparse_mask = sparse > 0
 
     for loss_func in loss_funcs:
         if loss_func == "l1":
             # Compute L1 loss per sample using masked operations
-            l1_loss = torch.abs(depth_pred - depth_target)
+            l1_loss = torch.abs(dense - sparse)
             l1_loss = l1_loss * sparse_mask  # Apply mask
             # Sum over HW dimensions and divide by number of valid points per sample
             total += l1_loss.sum(dim=(1, 2, 3)) / sparse_mask.sum(dim=(1, 2, 3))
 
         elif loss_func == "l2":
             # Compute L2 loss per sample using masked operations
-            l2_loss = (depth_pred - depth_target) ** 2
+            l2_loss = (dense - sparse) ** 2
             l2_loss = l2_loss * sparse_mask  # Apply mask
             # Sum over HW dimensions and divide by number of valid points per sample
             total += l2_loss.sum(dim=(1, 2, 3)) / sparse_mask.sum(dim=(1, 2, 3))
@@ -103,8 +93,8 @@ def compute_loss(
                 raise ValueError(f"Image must have 1 or 3 channels, got {num_channels}")
 
             # Compute gradients for entire batch at once
-            grad_pred_x = torch.abs(depth_pred[:, :, :, :-1] - depth_pred[:, :, :, 1:])
-            grad_pred_y = torch.abs(depth_pred[:, :, :-1, :] - depth_pred[:, :, 1:, :])
+            grad_pred_x = torch.abs(dense[:, :, :, :-1] - dense[:, :, :, 1:])
+            grad_pred_y = torch.abs(dense[:, :, :-1, :] - dense[:, :, 1:, :])
             grad_gray_x = torch.abs(gray_image[:, :, :, :-1] - gray_image[:, :, :, 1:])
             grad_gray_y = torch.abs(gray_image[:, :, :-1, :] - gray_image[:, :, 1:, :])
 
@@ -118,10 +108,10 @@ def compute_loss(
                 raise ValueError("image must be provided for smooth loss")
 
             # Compute smoothness loss per sample using reduction over spatial dimensions
-            loss_h = torch.abs(depth_pred[:, :, :-1, :] - depth_pred[:, :, 1:, :]).mean(
+            loss_h = torch.abs(dense[:, :, :-1, :] - dense[:, :, 1:, :]).mean(
                 dim=(1, 2, 3)
             )
-            loss_w = torch.abs(depth_pred[:, :, :, :-1] - depth_pred[:, :, :, 1:]).mean(
+            loss_w = torch.abs(dense[:, :, :, :-1] - dense[:, :, :, 1:]).mean(
                 dim=(1, 2, 3)
             )
             total += loss_h + loss_w
@@ -147,23 +137,85 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
     3. Using a parametrized affine transformation to convert from the model's
        depth representation to metric depth values
     4. Iteratively refining the prediction through a guided diffusion process
+    """  # noqa: E501
 
-    Attributes:
-        unet (UNet2DConditionModel): U-Net model for diffusion process
-        vae (AutoencoderKL): Variational autoencoder for encoding/decoding images
-        scheduler (DDIMScheduler): Scheduler for the diffusion process
-        text_encoder (CLIPTextModel): Text encoder for conditioning
-        tokenizer (CLIPTokenizer): Tokenizer for text inputs
-        image_processor (MarigoldImageProcessor): Processor for image preprocessing
-        empty_text_embedding (torch.Tensor): Cached empty text embedding for conditioning
-        dtype (torch.dtype): Data type for model computation
-        _execution_device (torch.device): Device for model execution
-    """
+    def _affine_to_metric(
+        self,
+        dense: torch.Tensor,  # [N, 1, H, W]
+        scale: torch.Tensor,  # [N, 1, H, W] or [N, 1, 1, 1]
+        shift: torch.Tensor,  # [N, 1, H, W] or [N, 1, 1, 1]
+        sparse_range: torch.Tensor,  # [N, 1, 1, 1]
+        sparse_min: torch.Tensor,  # [N, 1, 1, 1]
+    ) -> torch.Tensor:
+        """
+        Converts the model's affine-invariant depth representation to metric depth values.
+
+        This method applies an affine transformation to convert the normalized depth predictions
+        from the model's internal representation to actual metric depth values that match
+        the scale and range of the provided sparse depth measurements.
+
+        Args:
+            dense (torch.Tensor): Normalized depth predictions from the model with shape [N, 1, H, W].
+            scale (torch.Tensor): Scaling factor with shape [N, 1, H, W] or [N, 1, 1, 1].
+            shift (torch.Tensor): Shift factor with shape [N, 1, H, W] or [N, 1, 1, 1].
+            sparse_range (torch.Tensor): Range of sparse depth values with shape [N, 1, 1, 1].
+            sparse_min (torch.Tensor): Minimum value of sparse depth with shape [N, 1, 1, 1].
+
+        Returns:
+            torch.Tensor: Metric depth values with shape [N, 1, H, W].
+        """  # noqa: E501
+        return (scale**2) * sparse_range * dense + (shift**2) * sparse_min
+
+    def latent_to_metric(
+        self,
+        latent: torch.Tensor,  # [N, 4, EH, EW]
+        scale: torch.Tensor,  # [N, 1, H, W] or [N, 1, 1, 1]
+        shift: torch.Tensor,  # [N, 1, H, W] or [N, 1, 1, 1]
+        sparse_range: torch.Tensor,  # [N, 1, 1, 1]
+        sparse_min: torch.Tensor,  # [N, 1, 1, 1]
+        padding: tuple,
+        original_resolution: tuple,
+        interp_mode: str = "bilinear",
+        aa: bool = False,
+    ) -> torch.Tensor:
+        """
+        Converts latent representation to metric depth values.
+
+        This method decodes the latent representation from the diffusion model,
+        removes padding, resizes to the original resolution, and applies an affine
+        transformation to convert to metric depth values.
+
+        Args:
+            latent (torch.Tensor): Latent representation from the diffusion model with shape [N, 4, EH, EW].
+            scale (torch.Tensor): Scaling factor with shape [N, 1, H, W] or [N, 1, 1, 1].
+            shift (torch.Tensor): Shift factor with shape [N, 1, H, W] or [N, 1, 1, 1].
+            sparse_range (torch.Tensor): Range of sparse depth values with shape [N, 1, 1, 1].
+            sparse_min (torch.Tensor): Minimum value of sparse depth with shape [N, 1, 1, 1].
+            padding (tuple): Padding values used during processing.
+            original_resolution (tuple): Original resolution (height, width) to resize the output to.
+            interp_mode (str, optional): Interpolation mode for resizing.
+                Options are "bilinear" or "nearest". Defaults to "bilinear".
+            aa (bool, optional): Whether to use anti-aliasing during resizing. Defaults to False.
+
+        Returns:
+            torch.Tensor: Metric depth values with shape [N, 1, H, W].
+        """  # noqa: E501
+        affine_invariant_pred = self.decode_prediction(latent)  # [N, 1, PPH, PPW]
+        affine_invariant_pred = self.image_processor.unpad_image(
+            affine_invariant_pred, padding
+        )
+        affine_invariant_pred = self.image_processor.resize_antialias(
+            affine_invariant_pred, original_resolution, interp_mode, is_aa=aa
+        )  # [N, 1, H, W]
+        pred = self._affine_to_metric(
+            affine_invariant_pred, scale, shift, sparse_range, sparse_min
+        )
+        return pred  # [N, 1, H, W]
 
     def __call__(
         self,
-        image: np.ndarray | torch.Tensor,
-        sparse: np.ndarray | torch.Tensor,
+        imgs: np.ndarray,
+        sparses: np.ndarray,
         steps: int = 50,
         resolution: int = 768,
         seed: int = 2024,
@@ -173,13 +225,16 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         aa: bool = False,
         opt: str = "adam",
         lr: tuple[float, float] | None = None,
+        beta: float = 0.9,
     ) -> np.ndarray:
         """
-        Perform depth completion on an RGB image using sparse depth measurements.
+        Perform depth completion on a sequence of RGB images using sparse depth measurements.
 
         Args:
-            image (np.ndarray | torch.Tensor): Input RGB image of shape [H, W, C] or [N, C, H, W].
-            sparse (np.ndarray | torch.Tensor): Sparse depth measurements of shape [H, W] or [N, H, W].
+            imgs (np.ndarray): Numpy array of shape [N, L, H, W, C],
+                representing a sequence of images with C channels.
+            sparses (np.ndarray): Numpy array of shape [N, L, H, W],
+                representing a sequence of sparse depth maps.
                 Should have zeros at missing positions and positive values at
                 measurement points.
             steps (int, optional): Number of denoising steps.
@@ -202,59 +257,54 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 Options are "adam", "adamw", or "sgd". Defaults to "adam".
             lr (tuple[float, float], optional): Learning rates for (latent, scaling).
                 Defaults to (0.05, 0.005).
+            beta (float, optional): Momentum factor for prediction latents between
+                frames in a sequence. Must be in range [0, 1]. Defaults to 0.9.
 
         Returns:
-            np.ndarray: Dense depth prediction of shape [H, W] or [N, H, W].
+            np.ndarray: Dense depth prediction of shape [N, L, H, W].
 
         Raises:
-            ValueError: If sparse is not a 2D numpy array.
-        """  # noqa: E501
+            ValueError: If input shapes are incompatible or if beta is out of range.
+        """
         # Set device
         device: torch.device = self._execution_device
 
         # Get random generator
         generator = torch.Generator(device=device).manual_seed(seed)
 
-        # Check inputs
-        is_batched = False
-        if image.ndim == 3:
-            if sparse.ndim != 2:
-                raise ValueError(
-                    "Shape of sparse must be [H, W] if shape of image is [H, W, C], "
-                    f"but got shape of sparse: {sparse.shape}"
-                )
-            # Add batch dimension
-            image = image[None]
-            sparse = sparse[None]
-        elif image.ndim == 4:
-            if sparse.ndim != 3:
-                raise ValueError(
-                    "Shape of sparse must be [N, H, W] if shape of image is "
-                    f"[N, C, H, W], but got shape of sparse: {sparse.shape}"
-                )
-            if image.shape[0] != sparse.shape[0]:
-                raise ValueError(
-                    "Shape of sparse must be [N, H, W] if shape of image is "
-                    f"[N, C, H, W], but got shape of sparse: {sparse.shape}"
-                )
-            is_batched = True
-        else:
+        # Check input shapes
+        if (
+            imgs.ndim != 5
+            or sparses.ndim != 4
+            or imgs.shape[0] != sparses.shape[0]
+            or imgs.shape[1] != sparses.shape[1]
+        ):
             raise ValueError(
-                "Shape of image must be [H, W, C] or [N, C, H, W], "
-                f"but got shape of image: {image.shape}"
+                "Shape of image must be [N, L, C, H, W] and shape of sparse must be "
+                f"[N, L, H, W], but got image.shape: "
+                f"{imgs.shape} and sparse.shape: {sparses.shape}"
             )
-        # Convert to torch tensors if not already
-        if isinstance(image, np.ndarray):
-            image = torch.from_numpy(image).permute(
-                0, 3, 1, 2
-            )  # [N, H, W, C] -> [N, C, H, W]
-        if isinstance(sparse, np.ndarray):
-            sparse = torch.from_numpy(sparse).unsqueeze(1)  # [N, H, W] -> [N, 1, H, W]
+        if beta < 0 or beta > 1:
+            raise ValueError(f"beta must be in [0, 1], but got {beta}")
+
+        # Convert to torch tensors
+        imgs = torch.from_numpy(imgs).permute(
+            0, 1, 4, 2, 3
+        )  # [N, L, H, W, C] -> [N, L, C, H, W]
+        sparses = torch.from_numpy(sparses).unsqueeze(
+            2
+        )  # [N, L, H, W] -> [N, L, 1, H, W]
+        N, L, _, H, W = imgs.shape
 
         # Move to execution device
-        image = image.to(device, non_blocking=True)  # [N, C, H, W]
-        sparse = sparse.to(device, non_blocking=True)  # [N, 1, H, W]
-        batch_size = image.shape[0]
+        imgs = imgs.to(self._execution_device, non_blocking=True)  # [N, L, C, H, W]
+        sparses = sparses.to(
+            self._execution_device, non_blocking=True
+        )  # [N, L, 1, H, W]
+
+        # Set loss functions
+        if loss_funcs is None:
+            loss_funcs = ["l1", "l2"]
 
         # Set learning rates
         if lr is None:
@@ -263,11 +313,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         else:
             lr_latent, lr_scaling = lr
 
-        # Set loss functions
-        if loss_funcs is None:
-            loss_funcs = ["l1", "l2"]
-
         # Prepare empty text conditioning
+        # Used for all sequence frames
         if self.empty_text_embedding is None:
             with torch.no_grad():
                 text_inputs = self.tokenizer(
@@ -279,158 +326,182 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 )
                 text_input_ids = text_inputs.input_ids.to(device)
                 self.empty_text_embedding = self.text_encoder(text_input_ids)[0]
-        batch_empty_text_embedding = self.empty_text_embedding.repeat(batch_size, 1, 1)
+        batch_empty_text_embedding = self.empty_text_embedding.repeat(N, 1, 1)
 
-        # Preprocess input images
-        # Convert image to channel-first format (N, C, H, W)
-        image_resized, padding, original_resolution = self.image_processor.preprocess(
-            image,
-            processing_resolution=resolution,
-            device=device,
+        # Get prediction lantents common to all sequence frames
+        pred_latent_common = torch.randn(
+            (
+                N,
+                4,
+                resolution * H // (8 * max(H, W)),
+                resolution * W // (8 * max(H, W)),
+            ),
+            device=imgs.device,
             dtype=self.dtype,
-        )  # (N, 3, PPH, PPW)
+        )  # [N, 4, EH, EW]
+        pred_latent_prev: torch.Tensor | None = None
 
-        # Encode input image into latent space
-        with torch.no_grad():
-            image_latent, pred_latent = self.prepare_latents(
-                image_resized, None, generator, 1, batch_size
-            )  # [N, 4, EH, EW], [N, 4, EH, EW]
+        # Iterate over sequence length
+        ret: list[np.ndarray] = []
+        for frame_idx in range(L):
+            # Get current image and sparse depth
+            img: torch.Tensor = imgs[:, frame_idx]  # [N, C, H, W]
+            sparse: torch.Tensor = sparses[:, frame_idx]  # [N, 1, H, W]
 
-        # Preprocess sparse depth
-        sparse_mask = sparse > 0
-        pred_latent = torch.nn.Parameter(pred_latent)
+            # Preprocess input images
+            img_resized, padding, orig_size = self.image_processor.preprocess(
+                img,
+                processing_resolution=resolution,
+                device=device,
+                dtype=self.dtype,
+            )  # [N, C, PPH, PPW]
 
-        # Calculate min, max, and range for each sample in the batch [N] -> [N,1,1,1]
-        sparse_min = torch.stack(
-            [s[m].min() for s, m in zip(sparse, sparse_mask, strict=True)]
-        ).view(-1, 1, 1, 1)
-        sparse_max = torch.stack(
-            [s[m].max() for s, m in zip(sparse, sparse_mask, strict=True)]
-        ).view(-1, 1, 1, 1)
-        sparse_range = sparse_max - sparse_min
-
-        # Set up optimization targets and compute
-        # the range and lower bound of the sparse depth
-        if elemwise_scaling:
-            scale, shift = torch.nn.Parameter(
-                torch.ones(batch_size, 1, *original_resolution, device=device)
-            ), torch.nn.Parameter(
-                torch.zeros(batch_size, 1, *original_resolution, device=device)
-            )  # [N, 1, H, W], [N, 1, H, W]
-        else:
-            scale, shift = torch.nn.Parameter(
-                torch.ones(batch_size, 1, 1, 1, device=device)
-            ), torch.nn.Parameter(torch.zeros(batch_size, 1, 1, 1, device=device))
-            # [N, 1, 1, 1], [N, 1, 1, 1]
-
-        # Set up optimizer
-        optimizer: torch.optim.Optimizer
-        param_groups = [
-            {"params": [scale, shift], "lr": lr_scaling},
-            {"params": [pred_latent], "lr": lr_latent},
-        ]
-        if opt == "adam":
-            optimizer = torch.optim.Adam(param_groups)
-        elif opt == "adamw":
-            optimizer = torch.optim.AdamW(param_groups)
-        elif opt == "sgd":
-            optimizer = torch.optim.SGD(param_groups)
-        else:
-            raise ValueError(f"Unknown optimizer: {opt}")
-
-        def affine_to_metric(depth: torch.Tensor) -> torch.Tensor:
-            return (scale**2) * sparse_range * depth + (shift**2) * sparse_min
-
-        def latent_to_metric(latent: torch.Tensor) -> torch.Tensor:
-            affine_invariant_pred = self.decode_prediction(latent)  # [N, 1, PPH, PPW]
-            affine_invariant_pred = self.image_processor.unpad_image(
-                affine_invariant_pred, padding
-            )
-            affine_invariant_pred = self.image_processor.resize_antialias(
-                affine_invariant_pred,
-                original_resolution,
-                interp_mode,
-                is_aa=aa,
-            )  # [N, 1, H, W]
-            pred = affine_to_metric(affine_invariant_pred)
-            return pred  # [N, 1, H, W]
-
-        # Denoising loop
-        self.scheduler.set_timesteps(steps, device=device)
-        for t in self.scheduler.timesteps:
-            optimizer.zero_grad()
-
-            # Forward pass through the U-Net
-            latent = torch.cat([image_latent, pred_latent], dim=1)  # [N, 8, EH, EW]
-            noise = self.unet(
-                latent,
-                t,
-                encoder_hidden_states=batch_empty_text_embedding,
-                return_dict=False,
-            )[
-                0
-            ]  # [N, 4, EH, EW]
-
-            # Compute pred_epsilon to later rescale the depth latent gradient
+            # Get latent encodings
             with torch.no_grad():
-                a_prod_t = self.scheduler.alphas_cumprod[t]
-                b_prod_t = 1 - a_prod_t
-                pred_epsilon = (a_prod_t**0.5) * noise + (
-                    b_prod_t**0.5
-                ) * pred_latent  # [N, 4, EH, EW]
+                img_latent, _ = self.prepare_latents(
+                    img_resized, None, generator, 1, N
+                )  # [N, 4, EH, EW], [N, 4, EH, EW]
+                if pred_latent_prev is not None:
+                    pred_latent = (
+                        beta * pred_latent_common + (1 - beta) * pred_latent_prev
+                    )
+                else:
+                    pred_latent = pred_latent_common
 
-            # Forward denoising step
-            step_output = self.scheduler.step(
-                noise, t, pred_latent, generator=generator
-            )
+            # Set current prediction latents as trainable params
+            pred_latent = torch.nn.Parameter(pred_latent)  # [N, 4, EH, EW]
 
-            # Preview the final output depth with
-            # Tweedie's formula (See Equation 1 of the paper)
-            preview = step_output.pred_original_sample  # [N, 4, EH, EW]
+            # Calculate min, max, and range for each sample in the batch [N] -> [N,1,1,1]
+            sparse_mask = sparse > 0
+            sparse_min = torch.stack(
+                [s[m].min() for s, m in zip(sparse, sparse_mask, strict=True)]
+            ).view(-1, 1, 1, 1)
+            sparse_max = torch.stack(
+                [s[m].max() for s, m in zip(sparse, sparse_mask, strict=True)]
+            ).view(-1, 1, 1, 1)
+            sparse_range = sparse_max - sparse_min
 
-            # Decode to metric space, compute loss with guidance and backpropagate
-            dense = latent_to_metric(preview)  # [N, 1, H, W]
-            loss = compute_loss(dense, sparse, loss_funcs, image=image)
-            loss.backward(torch.ones_like(loss))  # Preserve batch dimension
+            # Set up scaling params
+            if elemwise_scaling:
+                # Element-wise scaling
+                scale, shift = torch.nn.Parameter(
+                    torch.ones(N, 1, *orig_size, device=device)
+                ), torch.nn.Parameter(
+                    torch.zeros(N, 1, *orig_size, device=device)
+                )  # [N, 1, H, W], [N, 1, H, W]
+            else:
+                # Global scaling
+                scale, shift = torch.nn.Parameter(
+                    torch.ones(N, 1, 1, 1, device=device)
+                ), torch.nn.Parameter(torch.zeros(N, 1, 1, 1, device=device))
+                # [N, 1, 1, 1], [N, 1, 1, 1]
 
-            # Scale gradients up
-            with torch.no_grad():
-                # Calculate norms per sample in the batch
-                pred_epsilon_norm = torch.linalg.norm(
-                    pred_epsilon.view(batch_size, -1), dim=1
-                )  # [N]
-                depth_latent_grad_norm = torch.linalg.norm(
-                    pred_latent.grad.view(batch_size, -1), dim=1
-                )  # [N]
+            # Set up optimizer
+            optimizer: torch.optim.Optimizer
+            param_groups = [
+                {"params": [scale, shift], "lr": lr_scaling},
+                {"params": [pred_latent], "lr": lr_latent},
+            ]
+            if opt == "adam":
+                optimizer = torch.optim.Adam(param_groups)
+            elif opt == "adamw":
+                optimizer = torch.optim.AdamW(param_groups)
+            elif opt == "sgd":
+                optimizer = torch.optim.SGD(param_groups)
+            else:
+                raise ValueError(f"Unknown optimizer: {opt}")
 
-                # Calculate scaling factor per sample
-                scaling_factor = pred_epsilon_norm / torch.clamp(
-                    depth_latent_grad_norm, min=1e-8
-                )  # [N]
+            # Denoising loop
+            self.scheduler.set_timesteps(steps, device=device)
+            for t in self.scheduler.timesteps:
+                optimizer.zero_grad()
 
-                # Reshape scaling factor for broadcasting
-                scaling_factor = scaling_factor.view(
-                    batch_size, 1, 1, 1
-                )  # [N, 1, 1, 1]
+                # Forward pass through the U-Net
+                latent = torch.cat([img_latent, pred_latent], dim=1)  # [N, 8, EH, EW]
+                noise = self.unet(
+                    latent,
+                    t,
+                    encoder_hidden_states=batch_empty_text_embedding,
+                    return_dict=False,
+                )[
+                    0
+                ]  # [N, 4, EH, EW]
 
-                # Apply per-sample scaling
-                pred_latent.grad *= scaling_factor  # [N, 4, EH, EW]
+                # Compute pred_epsilon to later rescale the depth latent gradient
+                with torch.no_grad():
+                    a_prod_t = self.scheduler.alphas_cumprod[t]
+                    b_prod_t = 1 - a_prod_t
+                    pred_epsilon = (a_prod_t**0.5) * noise + (
+                        b_prod_t**0.5
+                    ) * pred_latent  # [N, 4, EH, EW]
 
-            # Execute the update step through guidance backprop
-            optimizer.step()
-
-            # Execute update of the latent with regular denoising diffusion step
-            with torch.no_grad():
-                pred_latent.data = self.scheduler.step(
+                # Preview the final output depth with
+                # Tweedie's formula (See Equation 1 of the paper)
+                preview = self.scheduler.step(
                     noise, t, pred_latent, generator=generator
-                ).prev_sample
+                ).pred_original_sample  # [N, 4, EH, EW]
 
-        # Decode predictions from latent into pixel space
-        with torch.no_grad():
-            dense = latent_to_metric(pred_latent.detach())
+                # Decode to metric space, compute loss with guidance and backpropagate
+                dense = self.latent_to_metric(
+                    preview,
+                    scale,
+                    shift,
+                    sparse_range,
+                    sparse_min,
+                    padding,
+                    orig_size,
+                    interp_mode,
+                    aa,
+                )  # [N, 1, H, W]
+                loss = compute_loss(dense, sparse, loss_funcs, image=img)
+                loss.backward(torch.ones_like(loss))  # Preserve batch dimension
 
-        # return Numpy array
-        dense = self.image_processor.pt_to_numpy(dense)  # (N, H, W, 1)
-        if is_batched:
-            return np.squeeze(dense, axis=-1)  # [N, H, W]
-        return np.squeeze(dense)  # [H, W]
+                # Scale gradients up
+                with torch.no_grad():
+                    # Calculate norms per sample in the batch
+                    pred_epsilon_norm = torch.linalg.norm(
+                        pred_epsilon.view(N, -1), dim=1
+                    )  # [N]
+                    pred_latent_grad_norm = torch.linalg.norm(
+                        pred_latent.grad.view(N, -1), dim=1
+                    )  # [N]
+
+                    # Calculate scaling factor per sample
+                    factor = pred_epsilon_norm / torch.clamp(
+                        pred_latent_grad_norm, min=1e-8
+                    )  # [N]
+                    # Reshape scaling factor for broadcasting
+                    factor = factor.view(N, 1, 1, 1)  # [N, 1, 1, 1]
+
+                    # Apply per-sample scaling
+                    pred_latent.grad *= factor  # [N, 4, EH, EW]
+
+                # Backprop
+                optimizer.step()
+
+                # Execute update of the latent with regular denoising diffusion step
+                with torch.no_grad():
+                    pred_latent.data = self.scheduler.step(
+                        noise, t, pred_latent, generator=generator
+                    ).prev_sample
+
+            # Cache previous prediction latents
+            pred_latent_prev = pred_latent.detach()
+
+            # Compute dense maps for the current frame
+            with torch.no_grad():
+                dense = self.latent_to_metric(
+                    pred_latent_prev,
+                    scale,
+                    shift,
+                    sparse_range,
+                    sparse_min,
+                    padding,
+                    orig_size,
+                    interp_mode,
+                    aa,
+                )  # [N, 1, H, W]
+                dense_np = self.image_processor.pt_to_numpy(dense)  # [N, H, W, 1]
+                dense_np = np.squeeze(dense_np, axis=-1)  # [N, H, W]
+                ret.append(np.expand_dims(dense_np, axis=1))  # [N, 1, H, W]
+        return np.concatenate(ret, axis=1)  # [N, L, H, W]
