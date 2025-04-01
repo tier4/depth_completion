@@ -398,14 +398,10 @@ def main(
 
     # Set attention processor
     # NOTE: AutoEncoderTiny does not implement set_attn_processor method
-    if attn == "2.0":
-        if vae == "original":
-            pipe.vae.set_attn_processor(AttnProcessor2_0())
-        pipe.unet.set_attn_processor(AttnProcessor2_0())
-    else:
-        if vae == "original":
-            pipe.vae.set_attn_processor(AttnProcessor())
-        pipe.unet.set_attn_processor(AttnProcessor())
+    attn_processor = AttnProcessor2_0 if attn == "2.0" else AttnProcessor
+    if vae == "original":
+        pipe.vae.set_attn_processor(attn_processor())
+    pipe.unet.set_attn_processor(attn_processor())
 
     # Compile model for faster inference
     if use_compile:
