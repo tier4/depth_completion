@@ -39,13 +39,6 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 )
 @click.argument("out_dir", type=click.Path(exists=False, path_type=Path))
 @click.option(
-    "--seg-dir",
-    type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
-    default=None,
-    help="Path to directory containing segmentation maps to use for depth completion.",
-    show_default=True,
-)
-@click.option(
     "--model",
     type=click.Choice(["original", "lcm"]),
     default="original",
@@ -240,7 +233,6 @@ def main(
     img_dir: Path,
     sparse_dir: Path,
     out_dir: Path,
-    seg_dir: Path | None,
     model: str,
     vae: str,
     steps: int,
@@ -291,30 +283,13 @@ def main(
             loss_funcs_.append(loss_func)
     loss_funcs = loss_funcs_
 
-    # Load segmentation mapping data (if provided)
-    if seg_dir is not None:
-        seg_meta_path = seg_dir / "map.csv"
-        if not seg_meta_path.exists():
-            logger.error(f"Segmentation mapping file not found at {seg_meta_path}")
-            seg_dir = None
-        else:
-            seg_meta = utils.load_csv(
-                seg_meta_path,
-                columns={"id": int, "name": str, "r": int, "g": int, "b": int},
-            )
-            seg_ids: dict[str, int] = {
-                seg_meta["name"][i]: seg_meta["id"][i]
-                for i in range(len(seg_meta["name"]))
-            }
-
     # Get paths of input images
     img_paths_all = utils.get_img_paths(img_dir)
     img_paths_all.sort(key=lambda x: x.name)
 
-    # Get paths of input depth images and optionally segmentation maps
+    # Get paths of sparse depth maps and camera images
     sparse_paths: list[Path] = []
     img_paths: list[Path] = []
-    seg_paths: list[Path] = []
     for path in img_paths_all:
         depth_path_candidates = list(
             filter(
@@ -328,20 +303,6 @@ def main(
         if len(depth_path_candidates) == 0:
             logger.warning(f"No depth map found for image {path} (skipped)")
             continue
-        if seg_dir is not None:
-            seg_path_candidates = list(
-                filter(
-                    lambda p: p.exists(),
-                    [
-                        seg_dir / path.relative_to(img_dir).with_suffix(ext)
-                        for ext in NPARRAY_EXTENSIONS
-                    ],
-                )
-            )
-            if len(seg_path_candidates) == 0:
-                logger.warning(f"No segmentation map found for image{path} (skipped)")
-                continue
-            seg_paths.append(seg_path_candidates[0])
         sparse_paths.append(depth_path_candidates[0])
         img_paths.append(path)
     if len(img_paths) == 0:
@@ -423,16 +384,13 @@ def main(
     for i in range(0, len(img_paths), batch_size):
         batch_img_paths = img_paths[i : i + batch_size]
         batch_sparse_paths = sparse_paths[i : i + batch_size]
-        batch_seg_paths = seg_paths[i : i + batch_size] if seg_dir is not None else []
         bs = len(batch_img_paths)
 
         # Load images and arrays
         imgs: list[np.ndarray] = []
         sparses: list[np.ndarray] = []
-        segs: list[np.ndarray] = []
         batch_img_paths_: list[Path] = []
         batch_sparse_paths_: list[Path] = []
-        batch_seg_paths_: list[Path] = []
         time_disk = 0.0
         stime = time.time()
         for j in range(len(batch_img_paths)):
@@ -447,14 +405,8 @@ def main(
             sparse = utils.load_array(batch_sparse_paths[j])
             sparses.append(sparse)
             batch_sparse_paths_.append(batch_sparse_paths[j])
-            # Load segmentation map
-            if len(batch_seg_paths) > 0:
-                seg = utils.load_array(batch_seg_paths[j])
-                segs.append(seg)
-                batch_seg_paths_.append(batch_seg_paths[j])
         batch_img_paths = batch_img_paths_
         batch_sparse_paths = batch_sparse_paths_
-        batch_seg_paths = batch_seg_paths_
 
         # Skip to the next batch if all images are invalid
         if len(imgs) == 0:
@@ -466,68 +418,7 @@ def main(
         batch_sparses = np.stack(sparses, axis=0)
         if normed:
             batch_sparses /= max_distance
-        if len(segs) > 0:
-            batch_segs = np.stack(segs, axis=0)
         time_disk += time.time() - stime
-
-        # Add guides to sparse depth map using segmentation map
-        # TODO: Eliminate for loop over batch dimension
-        time_guides = 0.0
-        if seg_dir is not None:
-            stime = time.time()
-            for sparse, seg, sparse_path, seg_path in zip(
-                batch_sparses,
-                batch_segs,
-                batch_sparse_paths,
-                batch_seg_paths,
-                strict=True,
-            ):
-                if sparse.shape != seg.shape:
-                    logger.error(
-                        f"Shape of segmentation map {seg_path} (={seg.shape}) is not "
-                        f"compatible with shape of sparse map {sparse_path} "
-                        f"(={sparse.shape}). Ignoring segmentation map."
-                    )
-                    continue
-                sparse_src = sparse.copy()
-                # Set sky pixels to max distance
-                if "sky" in seg_ids:
-                    sparse[(seg == seg_ids["sky"]) & (sparse_src <= 0)] = max_distance
-                # Complete missing depth values using
-                # segmentation map for specific classes
-                for class_name in [
-                    "ego_vehicle",
-                    "road",
-                    "crosswalk",
-                    "striped_road_marking",
-                ]:
-                    if class_name not in seg_ids:
-                        continue
-                    seg_mask = seg == seg_ids[class_name]
-                    seg_mask_with_sparse_depth = (sparse_src > 0) & seg_mask
-
-                    # Calculate sum of depth values for each row where mask is True
-                    row_sums = np.sum(sparse_src * seg_mask_with_sparse_depth, axis=-1)
-
-                    # Count number of valid depth points in each row
-                    row_counts = np.sum(seg_mask_with_sparse_depth, axis=-1)
-
-                    # Avoid division by zero by setting counts of 0 to 1
-                    safe_counts = np.maximum(row_counts, 1)
-
-                    # Calculate average of non-zero depth values for each row
-                    values = row_sums / safe_counts
-
-                    # Only use average values where we had at least
-                    # one valid depth point
-                    values = np.where(row_counts > 0, values, 0)
-
-                    # Update depth map
-                    for y in range(values.shape[0]):
-                        if values[y] > 0:
-                            sparse[y, seg_mask[y]] = values[y]
-            time_guides = time.time() - stime
-        postfix["time/guides"] = time_guides
 
         # Run inference
         stime = time.time()
