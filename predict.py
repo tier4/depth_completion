@@ -8,7 +8,6 @@ import numpy as np
 import torch
 import tqdm
 from diffusers import AutoencoderTiny, DDIMScheduler
-from diffusers.models.attention_processor import AttnProcessor, AttnProcessor2_0
 from loguru import logger
 from PIL import Image
 
@@ -212,16 +211,6 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     help="Learning rate for scale and shift parameters.",
 )
 @click.option(
-    "--attn",
-    type=click.Choice(["1.0", "2.0"]),
-    default="2.0",
-    help="Attention processor. "
-    "1.0 - The legacy attention processor. "
-    "2.0 - The new attention processor from PyTorch 2.0. "
-    "Slightly faster than 1.0.",
-    show_default=True,
-)
-@click.option(
     "-bs",
     "--batch-size",
     type=click.IntRange(min=1),
@@ -254,7 +243,6 @@ def main(
     opt: str,
     lr_latent: float,
     lr_scaling: float,
-    attn: str,
     vis_range: str,
     batch_size: int,
 ) -> None:
@@ -356,13 +344,6 @@ def main(
     pipe.scheduler = DDIMScheduler.from_config(
         pipe.scheduler.config, timestep_spacing="trailing"
     )
-
-    # Set attention processor
-    # NOTE: AutoEncoderTiny does not implement set_attn_processor method
-    attn_processor = AttnProcessor2_0 if attn == "2.0" else AttnProcessor
-    if vae == "original":
-        pipe.vae.set_attn_processor(attn_processor())
-    pipe.unet.set_attn_processor(attn_processor())
 
     # Compile model for faster inference
     if use_compile:
