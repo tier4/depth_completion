@@ -356,7 +356,7 @@ def main(
     logger.info(
         f"Initialized inference pipeline "
         f"(dtype={precision}, vae={vae}, model={model}, "
-        f"loss_funcs={loss_funcs}, attn={attn}, batch_size={batch_size})"
+        f"loss_funcs={loss_funcs}, batch_size={batch_size})"
     )
 
     # Evaluation loop
