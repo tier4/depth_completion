@@ -71,7 +71,8 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     "--res",
     type=click.IntRange(min=1),
     default=768,
-    help="Input resolution. Input images will be resized to ${res} x ${res}.",
+    help="Input resolution. Input images will be resized so that the size "
+    "of the longer side is ${res} keeping aspect ratio.",
     show_default=True,
 )
 @click.option(
