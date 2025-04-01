@@ -23,6 +23,11 @@ CAMERA_CATEGORIES = [
     "CAM_BACK_NARROW",
 ]
 
+IMAGE_DIR_NAME = "image"
+SPARSE_DIR_NAME = "sparse"
+VIS_DIR_NAME = "vis"
+DENSE_DIR_NAME = "dense"
+
 
 def crop_center(
     image: np.ndarray, height_ratio: float, width_ratio: float
@@ -498,6 +503,44 @@ def has_nan(x: np.ndarray) -> bool:
         bool: True if array contains NaN values, False otherwise
     """  # noqa: E501
     return np.isnan(x).any()
+
+
+def is_dataset_dir(path: Path) -> bool:
+    """Check if a path points to a valid dataset directory.
+
+    A valid dataset directory must be a directory that contains both
+    an 'image' subdirectory and a 'sparse' subdirectory.
+
+    Args:
+        path (Path): Path to check
+
+    Returns:
+        bool: True if path is a valid dataset directory, False otherwise
+    """
+    if not path.is_dir():
+        return False
+    return (path / IMAGE_DIR_NAME).exists() and (path / SPARSE_DIR_NAME).exists()
+
+
+def find_dataset_dirs(root: Path) -> list[Path]:
+    """Find all valid dataset directories under the given root directory.
+
+    A valid dataset directory is one that passes the is_dataset_dir() check.
+    This function recursively searches through all subdirectories.
+
+    Args:
+        root (Path): Root directory to search for dataset directories
+
+    Returns:
+        list[Path]: List of paths to valid dataset directories
+    """
+    if is_dataset_dir(root):
+        return [root]
+    ret = []
+    for path in root.rglob("*"):
+        if is_dataset_dir(path):
+            ret.append(path)
+    return ret
 
 
 def to_depth_map(

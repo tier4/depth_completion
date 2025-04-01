@@ -19,7 +19,14 @@ from marigold_dc import (
     VAE_CKPT_LIGHT,
     MarigoldDepthCompletionPipeline,
 )
-from utils import NPARRAY_EXTENSIONS
+from utils import (
+    DENSE_DIR_NAME,
+    IMAGE_DIR_NAME,
+    NPARRAY_EXTENSIONS,
+    SPARSE_DIR_NAME,
+    VIS_DIR_NAME,
+    find_dataset_dirs,
+)
 
 torch.backends.cudnn.benchmark = True  # NOTE: Optimize convolution algorithms
 torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
@@ -29,14 +36,10 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     help="Predict dense depth maps from sparse depth maps and camera images."
 )
 @click.argument(
-    "img_dir",
+    "src_root",
     type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
 )
-@click.argument(
-    "sparse_dir",
-    type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
-)
-@click.argument("out_dir", type=click.Path(exists=False, path_type=Path))
+@click.argument("dst_root", type=click.Path(exists=False, path_type=Path))
 @click.option(
     "--model",
     type=click.Choice(["original", "lcm"]),
@@ -97,7 +100,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "--save-depth",
+    "--save-dense",
     type=bool,
     default=True,
     help="Whether to save the inferenced dense depth maps. "
@@ -135,7 +138,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     default="bl2",
     help="Specify the compression format for the output depth maps. "
     "If none, saves uncompressed. "
-    "This option is ignored if --save-depth=False",
+    "This option is ignored if --save-dense=False",
     show_default=True,
 )
 @click.option(
@@ -168,13 +171,6 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "--normed",
-    type=bool,
-    default=False,
-    help="Whether to predict dense depth maps in normalized [0, 1] range.",
-    show_default=True,
-)
-@click.option(
     "--overlay-sparse",
     type=bool,
     default=False,
@@ -192,14 +188,14 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 @click.option(
     "--opt",
     type=click.Choice(["adam", "adamw", "sgd"]),
-    default="adam",
+    default="sgd",
     help="Optimizer to use for depth completion.",
     show_default=True,
 )
 @click.option(
     "--lr-latent",
     type=click.FloatRange(min=0, min_open=True),
-    default=0.05,
+    default=0.1,
     help="Learning rate for latent variable.",
     show_default=True,
 )
@@ -219,15 +215,14 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 def main(
-    img_dir: Path,
-    sparse_dir: Path,
-    out_dir: Path,
+    src_root: Path,
+    dst_root: Path,
     model: str,
     vae: str,
     steps: int,
     res: int,
     max_distance: float,
-    save_depth: bool,
+    save_dense: bool,
     vis: bool,
     log: Path | None,
     log_level: str,
@@ -237,7 +232,6 @@ def main(
     elemwise_scaling: bool,
     interp_mode: str,
     loss_funcs: list[str],
-    normed: bool,
     overlay_sparse: bool,
     aa: bool,
     opt: str,
@@ -261,46 +255,6 @@ def main(
     if not torch.cuda.is_available():
         logger.critical("CUDA must be available to run this script.")
         sys.exit(1)
-
-    # Check loss functions
-    loss_funcs_ = []
-    for loss_func in loss_funcs:
-        if loss_func not in SUPPORTED_LOSS_FUNCS:
-            logger.error(f"Invalid loss function (skipped): {loss_func}")
-        else:
-            loss_funcs_.append(loss_func)
-    loss_funcs = loss_funcs_
-
-    # Get paths of input images
-    img_paths_all = utils.get_img_paths(img_dir)
-    img_paths_all.sort(key=lambda x: x.name)
-
-    # Get paths of sparse depth maps and camera images
-    sparse_paths: list[Path] = []
-    img_paths: list[Path] = []
-    for path in img_paths_all:
-        depth_path_candidates = list(
-            filter(
-                lambda p: p.exists(),
-                [
-                    sparse_dir / path.relative_to(img_dir).with_suffix(ext)
-                    for ext in NPARRAY_EXTENSIONS
-                ],
-            )
-        )
-        if len(depth_path_candidates) == 0:
-            logger.warning(f"No depth map found for image {path} (skipped)")
-            continue
-        sparse_paths.append(depth_path_candidates[0])
-        img_paths.append(path)
-    if len(img_paths) == 0:
-        logger.critical("No valid input found")
-        sys.exit(1)
-    logger.info(f"Found {len(sparse_paths):,} input pairs")
-
-    # Create output directory if it doesn't exist
-    if not out_dir.exists():
-        out_dir.mkdir(parents=True)
 
     # Select computation precision
     # NOTE: fp16 may produce nans in prediction outputs
@@ -359,139 +313,200 @@ def main(
         f"loss_funcs={loss_funcs}, batch_size={batch_size})"
     )
 
-    # Evaluation loop
-    progbar = tqdm.tqdm(total=len(img_paths), dynamic_ncols=True)
-    postfix: dict[str, Any] = {}
-    for i in range(0, len(img_paths), batch_size):
-        batch_img_paths = img_paths[i : i + batch_size]
-        batch_sparse_paths = sparse_paths[i : i + batch_size]
-        bs = len(batch_img_paths)
+    # Check loss functions
+    loss_funcs_ = []
+    for loss_func in loss_funcs:
+        if loss_func not in SUPPORTED_LOSS_FUNCS:
+            logger.error(f"Invalid loss function (skipped): {loss_func}")
+        else:
+            loss_funcs_.append(loss_func)
+    loss_funcs = loss_funcs_
 
-        # Load images and arrays
-        imgs: list[np.ndarray] = []
-        sparses: list[np.ndarray] = []
-        batch_img_paths_: list[Path] = []
-        batch_sparse_paths_: list[Path] = []
-        time_disk = 0.0
-        stime = time.time()
-        for j in range(len(batch_img_paths)):
-            # Load image
-            img, is_valid = utils.load_img(batch_img_paths[j], "RGB")
-            if not is_valid:
-                logger.error(f"Empty input image found: {batch_img_paths[j]} (skipped)")
+    # Find dataset directories
+    dataset_dirs = find_dataset_dirs(src_root)
+    if len(dataset_dirs) == 0:
+        logger.critical(f"No dataset directories found in {src_root}")
+        sys.exit(1)
+    logger.info(f"{len(dataset_dirs):,} dataset directories found")
+
+    # Collect image and sparse map paths
+    img_paths_all: dict[str, list[Path]] = {}
+    sparse_paths_all: dict[str, list[Path]] = {}
+    for dataset_dir in dataset_dirs:
+        img_dir = dataset_dir / IMAGE_DIR_NAME
+        img_paths = utils.get_img_paths(img_dir)
+        img_paths.sort(key=lambda path: path.name)
+        sparse_dir = dataset_dir / SPARSE_DIR_NAME
+        key = dataset_dir.name
+        img_paths_all[key] = []
+        sparse_paths_all[key] = []
+        for path in img_paths:
+            sparse_path_candids = list(
+                filter(
+                    lambda p: p.exists(),
+                    [
+                        sparse_dir / path.relative_to(img_dir).with_suffix(ext)
+                        for ext in NPARRAY_EXTENSIONS
+                    ],
+                )
+            )
+            if len(sparse_path_candids) == 0:
+                logger.warning(f"No sparse map found for image {path} (skipped)")
                 continue
-            imgs.append(img)
-            batch_img_paths_.append(batch_img_paths[j])
-            # Load sparse map
-            sparse = utils.load_array(batch_sparse_paths[j])
-            sparses.append(sparse)
-            batch_sparse_paths_.append(batch_sparse_paths[j])
-        batch_img_paths = batch_img_paths_
-        batch_sparse_paths = batch_sparse_paths_
+            sparse_path = sparse_path_candids[0]
+            img_paths_all[key].append(path)
+            sparse_paths_all[key].append(sparse_path)
+        logger.info(f"Found {len(img_paths_all[key]):,} input pairs for dataset {key}")
 
-        # Skip to the next batch if all images are invalid
-        if len(imgs) == 0:
-            progbar.update(bs)
-            continue
+    # Create output root if it doesn't exist
+    if not dst_root.exists():
+        dst_root.mkdir(parents=True)
 
-        # Make batch arrays
-        batch_imgs = np.stack(imgs, axis=0)
-        batch_sparses = np.stack(sparses, axis=0)
-        if normed:
-            batch_sparses /= max_distance
-        time_disk += time.time() - stime
+    # Evaluation loop
+    for dataset_dir in dataset_dirs:
+        logger.info(f"Processing dataset {dataset_dir.name}")
+        img_paths = img_paths_all[dataset_dir.name]
+        sparse_paths = sparse_paths_all[dataset_dir.name]
+        img_dir = dataset_dir / IMAGE_DIR_NAME
+        dst_dir = dst_root / (dataset_dir.relative_to(src_root))
+        dense_dir = dst_dir / DENSE_DIR_NAME
+        vis_dir = dst_dir / VIS_DIR_NAME
+        progbar = tqdm.tqdm(
+            total=len(img_paths),
+            dynamic_ncols=True,
+        )
+        postfix: dict[str, Any] = {}
+        for idx in range(0, len(img_paths), batch_size):
+            batch_img_paths = img_paths[idx : idx + batch_size]
+            batch_sparse_paths = sparse_paths[idx : idx + batch_size]
+            bs = len(batch_img_paths)
 
-        # Run inference
-        stime = time.time()
-        batch_denses: np.ndarray = pipe(
-            np.expand_dims(batch_imgs, axis=1),
-            np.expand_dims(batch_sparses, axis=1),
-            steps=steps,
-            resolution=res,
-            elemwise_scaling=elemwise_scaling,
-            interp_mode=interp_mode,
-            loss_funcs=loss_funcs,
-            aa=aa,
-            opt=opt,
-            lr=(lr_latent, lr_scaling),
-        )[
-            :, 0
-        ]  # [N, H, W]
-        if normed:
+            # Load images and arrays
+            imgs: list[np.ndarray] = []
+            sparses: list[np.ndarray] = []
+            batch_img_paths_: list[Path] = []
+            batch_sparse_paths_: list[Path] = []
+            time_disk = 0.0
+            stime = time.time()
+            for j in range(len(batch_img_paths)):
+                # Load image
+                img, is_valid = utils.load_img(batch_img_paths[j], "RGB")
+                if not is_valid:
+                    logger.error(
+                        f"Empty input image found: {batch_img_paths[j]} (skipped)"
+                    )
+                    continue
+                imgs.append(img)
+                batch_img_paths_.append(batch_img_paths[j])
+                # Load sparse map
+                sparse = utils.load_array(batch_sparse_paths[j])
+                sparses.append(sparse)
+                batch_sparse_paths_.append(batch_sparse_paths[j])
+            batch_img_paths = batch_img_paths_
+            batch_sparse_paths = batch_sparse_paths_
+
+            # Skip to the next batch if all images are invalid
+            if len(imgs) == 0:
+                progbar.update(bs)
+                continue
+
+            # Make batch arrays
+            batch_imgs = np.stack(imgs, axis=0)
+            batch_sparses = np.stack(sparses, axis=0) / max_distance
+            time_disk += time.time() - stime
+
+            # Run inference
+            stime = time.time()
+            batch_denses: np.ndarray = pipe(
+                np.expand_dims(batch_imgs, axis=1),
+                np.expand_dims(batch_sparses, axis=1),
+                steps=steps,
+                resolution=res,
+                elemwise_scaling=elemwise_scaling,
+                interp_mode=interp_mode,
+                loss_funcs=loss_funcs,
+                aa=aa,
+                opt=opt,
+                lr=(lr_latent, lr_scaling),
+            )[
+                :, 0
+            ]  # [N, H, W]
             batch_denses *= max_distance
             batch_sparses *= max_distance
-        postfix["time/infer"] = time.time() - stime
+            postfix["time/infer"] = time.time() - stime
 
-        # Iterate over each dense maps
-        time_vis = 0.0
-        for dense, sparse, img_path, img in zip(
-            batch_denses, batch_sparses, batch_img_paths, batch_imgs, strict=True
-        ):
-            if utils.has_nan(dense):
-                logger.error("NaN values found in dense depth map (skipped)")
-                continue
+            # Iterate over each dense maps
+            time_vis = 0.0
+            for dense, sparse, img_path, img in zip(
+                batch_denses, batch_sparses, batch_img_paths, batch_imgs, strict=True
+            ):
+                if utils.has_nan(dense):
+                    logger.error("NaN values found in dense depth map (skipped)")
+                    continue
 
-            # Save inferenced depth map
-            if save_depth:
-                stime = time.time()
-                save_dir = (out_dir / "depth" / img_path.relative_to(img_dir)).parent
-                if not save_dir.exists():
-                    save_dir.mkdir(parents=True)
-                if compress != "none":
-                    save_path = save_dir / img_path.with_suffix(f".{compress}").name
-                else:
-                    save_path = save_dir / img_path.with_suffix(".npy").name
-                utils.save_array(
-                    dense,
-                    save_path,
-                    compress=compress if compress != "none" else None,
-                )
-                time_disk += time.time() - stime
-
-            # Save visualization of inferenced depth map
-            if vis:
-                if vis_range == "abs":
-                    vis_min, vis_max = 0, max_distance
-                else:
-                    vis_min, vis_max = min(dense.min(), sparse.min()), max(
-                        dense.max(), sparse.max()
+                # Save dense depth map
+                if save_dense:
+                    stime = time.time()
+                    save_dir = (dense_dir / img_path.relative_to(img_dir)).parent
+                    if not save_dir.exists():
+                        save_dir.mkdir(parents=True)
+                    if compress != "none":
+                        save_path = save_dir / img_path.with_suffix(f".{compress}").name
+                    else:
+                        save_path = save_dir / img_path.with_suffix(".npy").name
+                    utils.save_array(
+                        dense,
+                        save_path,
+                        compress=compress if compress != "none" else None,
                     )
-                stime = time.time()
-                sparse_vis = pipe.image_processor.visualize_depth(
-                    sparse, val_min=vis_min, val_max=vis_max
-                )[0]
-                sparse_vis = np.array(sparse_vis)
-                sparse_vis[sparse <= 0] = 0
-                # Overlay sparse depth map on visualization of dense depth map
-                if overlay_sparse:
-                    mask = sparse > 0
-                    dense[mask] = sparse[mask]
-                dense_vis = pipe.image_processor.visualize_depth(
-                    dense, val_min=vis_min, val_max=vis_max
-                )[0]
-                out = Image.fromarray(
-                    utils.make_grid(
-                        np.stack(
-                            [img, sparse_vis, dense_vis],
-                            axis=0,
-                        ),
-                        rows=1,
-                        cols=3,
+                    time_disk += time.time() - stime
+
+                # Save visualization of dense depth map
+                if vis:
+                    if vis_range == "abs":
+                        vis_min, vis_max = 0, max_distance
+                    else:
+                        vis_min, vis_max = min(dense.min(), sparse.min()), max(
+                            dense.max(), sparse.max()
+                        )
+                    stime = time.time()
+                    sparse_vis = pipe.image_processor.visualize_depth(
+                        sparse, val_min=vis_min, val_max=vis_max
+                    )[0]
+                    sparse_vis = np.array(sparse_vis)
+                    sparse_vis[sparse <= 0] = 0
+                    # Overlay sparse depth map on visualization of dense depth map
+                    if overlay_sparse:
+                        mask = sparse > 0
+                        dense[mask] = sparse[mask]
+                    dense_vis = pipe.image_processor.visualize_depth(
+                        dense, val_min=vis_min, val_max=vis_max
+                    )[0]
+                    out = Image.fromarray(
+                        utils.make_grid(
+                            np.stack(
+                                [img, sparse_vis, dense_vis],
+                                axis=0,
+                            ),
+                            rows=1,
+                            cols=3,
+                        )
                     )
-                )
-                time_vis += time.time() - stime
-                stime = time.time()
-                save_dir = (out_dir / "vis" / img_path.relative_to(img_dir)).parent
-                if not save_dir.exists():
-                    save_dir.mkdir(parents=True)
-                save_path = save_dir / f"{img_path.stem}_vis.jpg"
-                out.save(save_path)
-                time_disk += time.time() - stime
-        postfix["time/disk"] = time_disk
-        postfix["time/vis"] = time_vis
-        progbar.set_postfix(postfix)
-        progbar.update(bs)
-    logger.success(f"Finished processing {len(img_paths):,} input pairs")
+                    time_vis += time.time() - stime
+                    stime = time.time()
+                    save_dir = (vis_dir / img_path.relative_to(img_dir)).parent
+                    if not save_dir.exists():
+                        save_dir.mkdir(parents=True)
+                    save_path = save_dir / f"{img_path.stem}_vis.jpg"
+                    out.save(save_path)
+                    time_disk += time.time() - stime
+            postfix["time/disk"] = time_disk
+            postfix["time/vis"] = time_vis
+            progbar.set_postfix(postfix)
+            progbar.update(bs)
+        progbar.close()
+        logger.success(f"Finished processing dataset {dataset_dir}")
+    logger.success("Finished all predictions")
 
 
 if __name__ == "__main__":
