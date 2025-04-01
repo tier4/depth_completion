@@ -149,13 +149,6 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "--elemwise-scaling",
-    type=bool,
-    default=False,
-    help="Whether to use element-wise scaling for depth completion.",
-    show_default=True,
-)
-@click.option(
     "--interp-mode",
     type=click.Choice(["bilinear", "nearest"]),
     default="nearest",
@@ -229,7 +222,6 @@ def main(
     precision: str,
     compress: str,
     use_compile: bool,
-    elemwise_scaling: bool,
     interp_mode: str,
     loss_funcs: list[str],
     overlay_sparse: bool,
@@ -422,7 +414,6 @@ def main(
                 np.expand_dims(batch_sparses, axis=1),
                 steps=steps,
                 resolution=res,
-                elemwise_scaling=elemwise_scaling,
                 interp_mode=interp_mode,
                 loss_funcs=loss_funcs,
                 aa=aa,

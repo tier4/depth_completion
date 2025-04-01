@@ -219,7 +219,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         steps: int = 50,
         resolution: int = 768,
         seed: int = 2024,
-        elemwise_scaling: bool = False,
         interp_mode: str = "bilinear",
         loss_funcs: list[str] | None = None,
         aa: bool = False,
@@ -244,8 +243,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 Higher values give better quality but use more memory.
                 Defaults to 768.
             seed (int, optional): Random seed for reproducibility. Defaults to 2024.
-            elemwise_scaling (bool, optional): Whether to use element-wise scaling
-                for the affine transformation. Defaults to False.
             interp_mode (str, optional): Interpolation mode for resizing.
                 Options are "bilinear" or "nearest". Defaults to "bilinear".
             loss_funcs (list[str], optional): List of loss functions to use for
@@ -382,19 +379,10 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             sparse_range = sparse_max - sparse_min
 
             # Set up scaling params
-            if elemwise_scaling:
-                # Element-wise scaling
-                scale, shift = torch.nn.Parameter(
-                    torch.ones(N, 1, *orig_size, device=device)
-                ), torch.nn.Parameter(
-                    torch.zeros(N, 1, *orig_size, device=device)
-                )  # [N, 1, H, W], [N, 1, H, W]
-            else:
-                # Global scaling
-                scale, shift = torch.nn.Parameter(
-                    torch.ones(N, 1, 1, 1, device=device)
-                ), torch.nn.Parameter(torch.zeros(N, 1, 1, 1, device=device))
-                # [N, 1, 1, 1], [N, 1, 1, 1]
+            scale, shift = torch.nn.Parameter(
+                torch.ones(N, 1, 1, 1, device=device)
+            ), torch.nn.Parameter(torch.zeros(N, 1, 1, 1, device=device))
+            # [N, 1, 1, 1], [N, 1, 1, 1]
 
             # Set up optimizer
             optimizer: torch.optim.Optimizer
