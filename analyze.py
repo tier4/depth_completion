@@ -7,14 +7,7 @@ import numpy as np
 import tqdm
 from loguru import logger
 
-from utils import (
-    NPARRAY_EXTENSIONS,
-    CommaSeparated,
-    is_array_path,
-    load_array,
-    mae,
-    rmse,
-)
+import utils
 
 METRICS = ["mae", "rmse"]
 Metric = Literal["mae", "rmse"]
@@ -22,12 +15,12 @@ Metric = Literal["mae", "rmse"]
 
 @click.command(help="Analyze results of depth completion.")
 @click.argument(
-    "sparse_dir",
+    "dataset_root",
     type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
 )
 @click.argument(
-    "dense_dir",
-    type=click.Path(exists=False, path_type=Path, file_okay=False, dir_okay=True),
+    "result_root",
+    type=click.Path(exists=True, path_type=Path, file_okay=False, dir_okay=True),
 )
 @click.option(
     "--log",
@@ -47,9 +40,9 @@ Metric = Literal["mae", "rmse"]
 )
 @click.option(
     "--metrics",
-    type=CommaSeparated(str),
+    type=utils.CommaSeparated(str),
     default="mae,rmse",
-    help="Metrics to compute.",
+    help="Comma-separated list of metrics to compute. " "Available options: mae, rmse",
     show_default=True,
 )
 @click.option(
@@ -67,15 +60,15 @@ Metric = Literal["mae", "rmse"]
     show_default=True,
 )
 @click.option(
-    "--max-distance",
+    "--max-depth",
     type=click.FloatRange(min=0, min_open=True),
     default=120.0,
     help="Maximum distance in meters of depth maps.",
     show_default=True,
 )
 def main(
-    sparse_dir: Path,
-    dense_dir: Path,
+    dataset_root: Path,
+    result_root: Path,
     metrics: list[Metric],
     calc_binned_scores: bool,
     log: Path | None,
@@ -83,7 +76,7 @@ def main(
         "TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"
     ],
     bin_size: float,
-    max_distance: float,
+    max_depth: float,
 ) -> None:
     # Set log level
     logger.remove()
@@ -96,6 +89,7 @@ def main(
         logger.add(log, rotation="100 MB", level=log_level)
         logger.info(f"Saving logs to {log}")
 
+    # Check metrics
     metrics_: list[Metric] = []
     for metric in metrics:
         if metric not in METRICS:
@@ -107,113 +101,147 @@ def main(
         sys.exit(1)
     metrics = metrics_
 
-    # Load sparse and dense depth maps
-    sparse_paths: list[Path] = []
-    dense_paths: list[Path] = []
-    cache: set[str] = set()
-    for path in sparse_dir.glob("**/*"):
-        if is_array_path(path):
+    # Find dataset directories
+    dataset_dirs = utils.find_dataset_dirs(dataset_root)
+    if len(dataset_dirs) == 0:
+        logger.critical("No dataset directories found")
+        sys.exit(1)
+
+    # Evaluation
+    for dataset_dir in dataset_dirs:
+        result_dir = result_root / (dataset_dir.relative_to(dataset_root))
+        if not result_dir.exists():
+            logger.warning(
+                f"No result directory found for {dataset_dir.name}. "
+                "Skip this dataset"
+            )
+            continue
+        sparse_dir = dataset_dir / utils.DATASET_DIR_NAME_SPARSE
+        dense_dir = result_dir / utils.RESULT_DIR_NAME_DENSE
+
+        # Load sparse and dense depth maps
+        sparse_paths: list[Path] = []
+        dense_paths: list[Path] = []
+        cache: set[str] = set()
+        for path in sparse_dir.rglob("*"):
+            if not utils.is_array_path(path):
+                continue
             stem = path.stem
-            if stem not in cache:
-                cache.add(stem)
-                dense_depth_path_candidates = list(
-                    filter(
-                        lambda p: p.exists(),
-                        [
-                            dense_dir / path.relative_to(sparse_dir).with_suffix(ext)
-                            for ext in NPARRAY_EXTENSIONS
-                        ],
-                    )
-                )
-                if len(dense_depth_path_candidates) == 0:
-                    logger.warning(f"No dense depth map found for {path} (skipped)")
-                    continue
-                sparse_paths.append(path)
-                dense_paths.append(dense_depth_path_candidates[0])
-    logger.info(f"Found {len(sparse_paths):,} pairs of sparse & dense depth maps")
+            if stem in cache:
+                continue
+            cache.add(stem)
+            sparse_path = path
+            dense_path = utils.find_file_with_exts(
+                dense_dir / sparse_path.relative_to(sparse_dir),
+                utils.NPARRAY_EXTS,
+            )
+            if dense_path is None:
+                logger.warning(f"No dense depth map found for {sparse_path} (skipped)")
+                continue
+            sparse_paths.append(sparse_path)
+            dense_paths.append(dense_path)
+        if len(sparse_paths) != len(dense_paths):
+            logger.critical(
+                f"Number of sparse and dense depth maps "
+                f"mismatch: {len(sparse_paths)} != {len(dense_paths)}"
+                f" for {dataset_dir.name}"
+            )
+            sys.exit(1)
+        elif len(sparse_paths) == 0:
+            logger.warning(
+                f"No dense & sparse depth map pairs found for {dataset_dir.name}. "
+                "Skip this dataset"
+            )
+            continue
+        logger.info(
+            f"Found {len(sparse_paths):,} pairs of sparse & dense "
+            f"depth maps for {dataset_dir.name}"
+        )
 
-    # Compute overall metrics for each pair
-    scores_overall: dict[Metric, list[float]] = {metric: [] for metric in metrics}
-    progbar = tqdm.tqdm(
-        total=len(sparse_paths), desc="Computing overall metrics...", dynamic_ncols=True
-    )
-    for sparse_path, dense_path in zip(sparse_paths, dense_paths, strict=True):
-        sparse_map = load_array(sparse_path)
-        dense_map = load_array(dense_path)
-
-        # Compute overall metrics
-        for metric in metrics:
-            mask = (sparse_map > 0) & (sparse_map <= max_distance)
-            if metric == "mae":
-                loss = mae(dense_map, sparse_map, mask=mask)
-            else:
-                loss = rmse(dense_map, sparse_map, mask=mask)
-            scores_overall[metric].append(loss)
-        progbar.update(1)
-    progbar.close()
-
-    # Print overall scores
-    logger.info("Overall scores:")
-    logger.info(f"  0.0 < x <= {max_distance:.1f} [m]:")
-    for metric in metrics:
-        logger.info(f"    {metric}: {np.mean(scores_overall[metric]):.2f}")
-
-    # Compute bin-wise metrics if requested
-    if calc_binned_scores:
-        # Calculate bin boundaries
-        scores_binned: list[dict[Metric, list[float]]] = []
-        lowers: list[float] = [0.0]
-        while lowers[-1] < max_distance:  # NOTE: Calc lower bounds of bins
-            lowers.append(lowers[-1] + bin_size)
-        lowers.pop()  # NOTE: Remove last lower bound
-        for _ in lowers:
-            scores_binned.append({metric: [] for metric in metrics})
-
+        # Compute overall metrics for each pair
+        scores_overall: dict[Metric, list[float]] = {metric: [] for metric in metrics}
         progbar = tqdm.tqdm(
             total=len(sparse_paths),
-            desc="Computing binned metrics...",
+            desc="Computing overall metrics...",
             dynamic_ncols=True,
         )
         for sparse_path, dense_path in zip(sparse_paths, dense_paths, strict=True):
-            sparse_map = load_array(sparse_path)
-            dense_map = load_array(dense_path)
+            sparse_map = utils.load_array(sparse_path)
+            dense_map = utils.load_array(dense_path)
 
-            # Compute bin-wise metrics
-            mask_base = (sparse_map > 0) & (sparse_map <= max_distance)
-            for bin_idx, lower in enumerate(lowers):
-                upper = min(lower + bin_size, max_distance)
-                if bin_idx == len(lowers) - 1:
-                    mask = mask_base & (lower <= sparse_map)
+            # Compute overall metrics
+            for metric in metrics:
+                mask = (sparse_map > 0) & (sparse_map <= max_depth)
+                if metric == "mae":
+                    loss = utils.mae(dense_map, sparse_map, mask=mask)
                 else:
-                    mask = mask_base & (lower <= sparse_map) & (sparse_map < upper)
-                if not np.any(mask):
-                    continue
-                for metric in metrics:
-                    if metric == "mae":
-                        loss = mae(dense_map, sparse_map, mask=mask)
-                    else:
-                        loss = rmse(dense_map, sparse_map, mask=mask)
-                    scores_binned[bin_idx][metric].append(loss)
+                    loss = utils.rmse(dense_map, sparse_map, mask=mask)
+                scores_overall[metric].append(loss)
             progbar.update(1)
         progbar.close()
 
-        # Print binned scores
-        logger.info("Binned scores:")
-        for bin_idx, lower in enumerate(lowers):
-            upper = min(lower + bin_size, max_distance)
-            if bin_idx == 0:
-                if len(lowers) == 1:
-                    logger.info(f"  {lower:.1f} < x <= {upper:.1f} [m]:")
+        # Print overall scores
+        logger.info("Overall scores:")
+        logger.info(f"  0.0 < x <= {max_depth:.1f} [m]:")
+        for metric in metrics:
+            logger.info(f"    {metric}: {np.mean(scores_overall[metric]):.2f}")
+
+        # Compute bin-wise metrics if requested
+        if calc_binned_scores:
+            # Calculate bin boundaries
+            scores_binned: list[dict[Metric, list[float]]] = []
+            lowers: list[float] = [0.0]
+            while lowers[-1] < max_depth:  # NOTE: Calc lower bounds of bins
+                lowers.append(lowers[-1] + bin_size)
+            lowers.pop()  # NOTE: Remove last lower bound
+            for _ in lowers:
+                scores_binned.append({metric: [] for metric in metrics})
+
+            progbar = tqdm.tqdm(
+                total=len(sparse_paths),
+                desc="Computing binned metrics...",
+                dynamic_ncols=True,
+            )
+            for sparse_path, dense_path in zip(sparse_paths, dense_paths, strict=True):
+                sparse_map = utils.load_array(sparse_path)
+                dense_map = utils.load_array(dense_path)
+
+                # Compute bin-wise metrics
+                mask_base = (sparse_map > 0) & (sparse_map <= max_depth)
+                for bin_idx, lower in enumerate(lowers):
+                    upper = min(lower + bin_size, max_depth)
+                    if bin_idx == len(lowers) - 1:
+                        mask = mask_base & (lower <= sparse_map)
+                    else:
+                        mask = mask_base & (lower <= sparse_map) & (sparse_map < upper)
+                    if not np.any(mask):
+                        continue
+                    for metric in metrics:
+                        if metric == "mae":
+                            loss = utils.mae(dense_map, sparse_map, mask=mask)
+                        else:
+                            loss = utils.rmse(dense_map, sparse_map, mask=mask)
+                        scores_binned[bin_idx][metric].append(loss)
+                progbar.update(1)
+            progbar.close()
+
+            # Print binned scores
+            logger.info("Binned scores:")
+            for bin_idx, lower in enumerate(lowers):
+                upper = min(lower + bin_size, max_depth)
+                if bin_idx == 0:
+                    if len(lowers) == 1:
+                        logger.info(f"  {lower:.1f} < x <= {upper:.1f} [m]:")
+                    else:
+                        logger.info(f"  {lower:.1f} < x < {upper:.1f} [m]:")
+                elif bin_idx == len(lowers) - 1:
+                    logger.info(f"  {lower:.1f} <= x <= {upper:.1f} [m]:")
                 else:
-                    logger.info(f"  {lower:.1f} < x < {upper:.1f} [m]:")
-            elif bin_idx == len(lowers) - 1:
-                logger.info(f"  {lower:.1f} <= x <= {upper:.1f} [m]:")
-            else:
-                logger.info(f"  {lower:.1f} <= x < {upper:.1f} [m]:")
-            for metric in metrics:
-                logger.info(
-                    f"    {metric}: {np.mean(scores_binned[bin_idx][metric]):.2f}"
-                )
+                    logger.info(f"  {lower:.1f} <= x < {upper:.1f} [m]:")
+                for metric in metrics:
+                    logger.info(
+                        f"    {metric}: {np.mean(scores_binned[bin_idx][metric]):.2f}"
+                    )
 
 
 if __name__ == "__main__":

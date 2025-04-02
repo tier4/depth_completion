@@ -10,7 +10,13 @@ import cv2
 import imagesize
 import numpy as np
 
-NPARRAY_EXTENSIONS = [".npy", ".npz", ".bl2"]
+NPARRAY_EXTS = [".npy", ".npz", ".bl2"]
+
+DATASET_DIR_NAME_SPARSE = "sparse"
+DATASET_DIR_NAME_IMAGE = "image"
+DATASET_DIR_NAME_SEG = "seg"
+RESULT_DIR_NAME_DENSE = "dense"
+RESULT_DIR_NAME_VIS = "vis"
 
 CAMERA_CATEGORIES = [
     "CAM_FRONT_WIDE",
@@ -22,6 +28,43 @@ CAMERA_CATEGORIES = [
     "CAM_BACK_WIDE",
     "CAM_BACK_NARROW",
 ]
+
+
+def is_dataset_dir(path: Path) -> bool:
+    """Check if a path points to a valid dataset directory.
+
+    A valid dataset directory must contain both 'image' and 'sparse' subdirectories.
+
+    Args:
+        path (Path): Path to check
+
+    Returns:
+        bool: True if path is a directory containing both image and sparse subdirectories,
+              False otherwise
+    """  # noqa: E501
+    sparse_dir = path / DATASET_DIR_NAME_SPARSE
+    img_dir = path / DATASET_DIR_NAME_IMAGE
+    return path.is_dir() and sparse_dir.is_dir() and img_dir.is_dir()
+
+
+def find_dataset_dirs(root: Path) -> list[Path]:
+    """Find all valid dataset directories recursively under the given root directory.
+
+    This function first checks if the root itself is a valid dataset directory.
+    If so, it returns just the root. Otherwise, it recursively searches for all
+    directories that contain both 'image' and 'sparse' subdirectories.
+
+    Args:
+        root (Path): Root directory to search for dataset directories
+
+    Returns:
+        list[Path]: List of paths to valid dataset directories (containing both
+                   image and sparse subdirectories)
+    """  # noqa: E501
+    if is_dataset_dir(root):
+        return [root]
+    ret = [path for path in root.rglob("*") if is_dataset_dir(path)]
+    return ret
 
 
 def load_csv(path: Path, columns: dict[str, type]) -> dict[str, list[Any]]:
@@ -89,7 +132,7 @@ def is_array_path(path: Path) -> bool:
     Returns:
         bool: True if path points to a numpy array file, False otherwise
     """
-    return path.is_file() and path.suffix in NPARRAY_EXTENSIONS
+    return path.is_file() and path.suffix in NPARRAY_EXTS
 
 
 def load_array(path: Path) -> np.ndarray:
@@ -115,7 +158,7 @@ def load_array(path: Path) -> np.ndarray:
     """  # noqa: E501
     if not is_array_path(path):
         raise ValueError(
-            f"Invalid extension: {path.suffix} (must be one of {NPARRAY_EXTENSIONS}"
+            f"Invalid extension: {path.suffix} (must be one of {NPARRAY_EXTS}"
         )
     if path.suffix == ".bl2":
         return blosc2.load_array(str(path))
@@ -178,12 +221,13 @@ def save_array(
         x (np.ndarray): The numpy array to save
         path (Path): Path where the array should be saved
         compress (str | None, optional): The compression format to use.
-            "npz" uses numpy's compressed format, "bl2" uses blosc2 compression.
-            If None, saves uncompressed. Defaults to None.
+            "npz" uses numpy's compressed format, "bl2" uses blosc2 compression,
+            "npy" saves as uncompressed numpy format.
+            If None, saves uncompressed as .npy. Defaults to None.
 
     Raises:
         ValueError: If the file extension doesn't match the compression format:
-            - .npy for uncompressed
+            - .npy for uncompressed or when compress="npy"
             - .npz for npz compression
             - .bl2 for blosc2 compression
 
@@ -192,6 +236,7 @@ def save_array(
         >>> save_array(arr, Path("array.npy"))  # Save uncompressed
         >>> save_array(arr, Path("array.npz"), compress="npz")  # Save with npz compression
         >>> save_array(arr, Path("array.bl2"), compress="bl2")  # Save with blosc2 compression
+        >>> save_array(arr, Path("array.npy"), compress="npy")  # Explicitly save as .npy
     """  # noqa: E501
     # Check extension of given path
     if compress is None and path.suffix != ".npy":
@@ -200,11 +245,15 @@ def save_array(
         raise ValueError(f"Invalid extension: {path.suffix} (must be .npz)")
     elif compress == "bl2" and path.suffix != ".bl2":
         raise ValueError(f"Invalid extension: {path.suffix} (must be .bl2)")
+    elif compress == "npy" and path.suffix != ".npy":
+        raise ValueError(f"Invalid extension: {path.suffix} (must be .npy)")
     # Compress if requested
     if compress == "npz":
         np.savez_compressed(path, x)
     elif compress == "bl2":
         blosc2.save_array(x, str(path), mode="w")
+    elif compress == "npy":
+        np.save(path, x)
     else:
         np.save(path, x)
 
