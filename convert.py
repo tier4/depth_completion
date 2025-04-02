@@ -57,7 +57,7 @@ def seg_img2array(
         logger.info(f"Saving logs to {log}")
 
     # Get paths of input segmentation images
-    seg_img_paths = utils.get_img_paths(seg_img_dir)
+    seg_img_paths = utils.find_img_paths(seg_img_dir)
 
     # Sort input image paths by filename
     seg_img_paths.sort(key=lambda x: x.name)
@@ -169,7 +169,7 @@ def depth_img2array(
         logger.info(f"Saving logs to {log}")
 
     # Get paths of input depth images
-    depth_img_paths = utils.get_img_paths(depth_img_dir)
+    depth_img_paths = utils.find_img_paths(depth_img_dir)
 
     # Sort input image paths by filename
     depth_img_paths.sort(key=lambda x: x.name)

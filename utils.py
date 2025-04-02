@@ -1,3 +1,4 @@
+import concurrent.futures
 import csv
 from collections.abc import Sequence
 from pathlib import Path
@@ -170,6 +171,54 @@ def load_array(path: Path) -> np.ndarray:
     elif path.suffix == ".npz":
         return np.load(path)["arr_0"]
     return np.load(path)
+
+
+def load_arrays(paths: list[Path], num_threads: int = 1) -> list[np.ndarray]:
+    """Load multiple numpy arrays from file paths in parallel using multithreading.
+
+    Opens multiple numpy array files in parallel and returns a list of loaded arrays.
+
+    Args:
+        paths (list[Path]): List of paths to the numpy array files to load.
+            Supports .npy (uncompressed numpy), .npz (numpy compressed),
+            and .bl2 (blosc2 compressed) formats.
+        num_threads (int, optional): Number of worker threads to use.
+            Defaults to 1.
+
+    Returns:
+        list[np.ndarray]: A list of loaded numpy arrays.
+
+    Example:
+        >>> # Load multiple arrays in parallel
+        >>> array_paths = [Path("array1.npy"), Path("array2.npz"), Path("array3.bl2")]
+        >>> arrays = load_arrays(array_paths, num_threads=8)
+        >>> for arr in arrays:
+        ...     # Process array
+        ...     pass
+    """  # noqa: E501
+
+    if not paths:
+        return []
+
+    # Define worker function that calls load_array
+    def worker(path: Path) -> np.ndarray:
+        return load_array(path)
+
+    # Use sequential loading when num_threads=1
+    if num_threads == 1:
+        return [load_array(path) for path in paths]
+
+    # Use ThreadPoolExecutor for parallel loading
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        # Submit all tasks and collect futures
+        future_to_path = {executor.submit(worker, path): path for path in paths}
+
+        # Collect results as they complete
+        for future in concurrent.futures.as_completed(future_to_path):
+            results.append(future.result())
+
+    return results
 
 
 def save_array(
@@ -355,14 +404,15 @@ def is_empty_img(img: Image.Image) -> bool:
 def load_img(path: Path, mode: str | None = None) -> tuple[np.ndarray, bool]:
     """Load an image from a file path and check if it's empty.
 
-    Opens an image file using PIL and optionally converts it to a specific color mode.
+    Opens an image file using OpenCV and optionally converts it to a specific color mode.
     Also checks if the image is empty (all values are 0).
     Returns the image as a numpy array.
 
     Args:
         path (Path): Path to the image file to load
-        mode (str | None, optional): PIL color mode to convert image
-            to (e.g. 'RGB', 'L'). If None, keeps original mode.
+        mode (str | None, optional): Color mode to convert image
+            to (e.g. 'RGB', 'BGR', 'L'). If None, automatically determines mode
+            based on image channels (RGB for 3 channels, L for 1 channel).
             Defaults to None.
 
     Returns:
@@ -373,16 +423,98 @@ def load_img(path: Path, mode: str | None = None) -> tuple[np.ndarray, bool]:
     Example:
         >>> # Load RGB image
         >>> img, is_valid = load_img(Path("image.jpg"), mode="RGB")
+        >>> # Load BGR image (OpenCV default)
+        >>> img, is_valid = load_img(Path("image.jpg"), mode="BGR")
         >>> # Load grayscale image
         >>> img, is_valid = load_img(Path("depth.png"), mode="L")
+        >>> # Auto-detect mode based on channels
+        >>> img, is_valid = load_img(Path("image.jpg"))
     """  # noqa: E501
-    img_pil: Image.Image = Image.open(path)
-    if mode is not None:
-        img_pil = img_pil.convert(mode)
-    img = np.array(img_pil)
+    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if img is None:
+        # Return empty array if image couldn't be loaded
+        return np.array([]), False
+
+    # Determine mode automatically if not specified
+    if mode is None:
+        if img.ndim == 3 and img.shape[2] == 3:
+            mode = "RGB"
+        elif img.ndim == 2 or (img.ndim == 3 and img.shape[2] == 1):
+            mode = "L"
+        # Keep as BGR for other cases
+
+    # Convert color mode if needed
+    if mode == "RGB":
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    elif mode == "L":
+        if img.ndim == 3 and img.shape[2] == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Add dimension to keep consistent shape for grayscale
+        if img.ndim == 2:
+            img = img[..., np.newaxis]
+
+    # Check if image is empty (all zeros)
     if not np.any(img):
         return img, False
     return img, True
+
+
+def load_imgs(
+    paths: list[Path], mode: str | None = None, num_threads: int = 1
+) -> list[tuple[np.ndarray, bool]]:
+    """Load multiple images from file paths in parallel using multithreading.
+
+    Opens multiple image files using OpenCV in parallel and optionally converts them
+    to a specific color mode. Returns a list of tuples containing the loaded images
+    as numpy arrays and boolean flags indicating if each image is empty.
+
+    Args:
+        paths (list[Path]): List of paths to the image files to load
+        mode (str | None, optional): Color mode to convert images
+            to (e.g. 'RGB', 'BGR', 'L'). If None, automatically determines mode
+            based on image channels (RGB for 3 channels, L for 1 channel).
+            Defaults to None.
+        num_threads (int, optional): Number of worker threads to use.
+            Defaults to 1.
+
+    Returns:
+        list[tuple[np.ndarray, bool]]: A list of tuples, each containing:
+            - The loaded image as a numpy array
+            - A boolean indicating if the image is non-empty (True) or empty (False)
+
+    Example:
+        >>> # Load multiple RGB images in parallel
+        >>> image_paths = [Path("image1.jpg"), Path("image2.jpg"), Path("image3.jpg")]
+        >>> images_with_flags = load_imgs(image_paths, mode="RGB", num_threads=8)
+        >>> for img, is_valid in images_with_flags:
+        ...     if is_valid:
+        ...         # Process valid image
+        ...         pass
+    """  # noqa: E501
+    import concurrent.futures
+
+    if not paths:
+        return []
+
+    # For single-threaded execution, use simple loop instead of ThreadPoolExecutor
+    if num_threads == 1:
+        return [load_img(path, mode) for path in paths]
+
+    # Define worker function that calls load_img
+    def worker(path: Path) -> tuple[np.ndarray, bool]:
+        return load_img(path, mode)
+
+    # Use ThreadPoolExecutor for parallel loading
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        # Submit all tasks and collect futures
+        future_to_path = {executor.submit(worker, path): path for path in paths}
+
+        # Collect results as they complete
+        for future in concurrent.futures.as_completed(future_to_path):
+            results.append(future.result())
+
+    return results
 
 
 def make_grid(
@@ -573,13 +705,48 @@ def is_img_file(path: Path) -> bool:
     return path.is_file() and imagesize.get(path) != (-1, -1)
 
 
-def get_img_paths(root: Path) -> list[Path]:
-    """Get all image file paths under the given root directory.
+def find_img_paths(root: Path) -> list[Path]:
+    """Find all valid image file paths recursively under the given root directory.
+
+    This function searches for all files in the root directory and its subdirectories,
+    and filters them to include only valid image files that can be opened.
 
     Args:
         root (Path): Root directory to search for images
 
     Returns:
-        list[Path]: List of paths to image files
+        list[Path]: List of paths to valid image files that can be opened
     """  # noqa: E501
     return [path for path in root.rglob("*") if is_img_file(path)]
+
+
+def find_file_with_exts(path: Path, exts: list[str] | None = None) -> Path | None:
+    """Find a file with the given path or with alternative extensions.
+
+    This function first checks if the exact path exists and is a file. If not,
+    it tries to find a file with the same stem but with one of the provided
+    alternative extensions.
+
+    Args:
+        path (Path): The original path to check
+        exts (list[str] | None, optional): List of alternative extensions to try.
+                                          Defaults to None.
+
+    Returns:
+        Path | None: The path to the found file, or None if no matching file exists
+
+    Examples:
+        >>> # Check if 'data.npy' exists, or try 'data.npz' and 'data.bl2'
+        >>> file_path = find_file_with_exts(Path('data.npy'), ['.npz', '.bl2'])
+    """
+    if path.exists() and path.is_file():
+        return path
+
+    # Try each extension
+    if exts is not None:
+        for ext in exts:
+            alt_path = path.with_suffix(ext)
+            if alt_path.exists() and alt_path.is_file():
+                return alt_path
+
+    return None

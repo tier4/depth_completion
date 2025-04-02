@@ -176,7 +176,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         padding: tuple,
         original_resolution: tuple,
         interp_mode: str = "bilinear",
-        aa: bool = False,
     ) -> torch.Tensor:
         """
         Converts latent representation to metric depth values.
@@ -195,7 +194,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             original_resolution (tuple): Original resolution (height, width) to resize the output to.
             interp_mode (str, optional): Interpolation mode for resizing.
                 Options are "bilinear" or "nearest". Defaults to "bilinear".
-            aa (bool, optional): Whether to use anti-aliasing during resizing. Defaults to False.
 
         Returns:
             torch.Tensor: Metric depth values with shape [N, 1, H, W].
@@ -205,7 +203,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             affine_invariant_pred, padding
         )
         affine_invariant_pred = self.image_processor.resize_antialias(
-            affine_invariant_pred, original_resolution, interp_mode, is_aa=aa
+            affine_invariant_pred, original_resolution, interp_mode
         )  # [N, 1, H, W]
         pred = self._affine_to_metric(
             affine_invariant_pred, scale, shift, sparse_range, sparse_min
@@ -222,7 +220,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         elemwise_scaling: bool = False,
         interp_mode: str = "bilinear",
         loss_funcs: list[str] | None = None,
-        aa: bool = False,
         opt: str = "adam",
         lr: tuple[float, float] | None = None,
         beta: float = 0.9,
@@ -251,8 +248,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             loss_funcs (list[str], optional): List of loss functions to use for
                 optimization. Options include "l1", "l2", "edge", and "smooth".
                 Defaults to ["l1", "l2"].
-            aa (bool, optional): Whether to enable anti-aliasing during processing.
-                Defaults to False.
             opt (str, optional): Optimizer to use for depth completion.
                 Options are "adam", "adamw", or "sgd". Defaults to "adam".
             lr (tuple[float, float], optional): Learning rates for (latent, scaling).
@@ -451,7 +446,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     padding,
                     orig_size,
                     interp_mode,
-                    aa,
                 )  # [N, 1, H, W]
                 loss = compute_loss(dense, sparse, loss_funcs, image=img)
                 loss.backward(torch.ones_like(loss))  # Preserve batch dimension
@@ -499,7 +493,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     padding,
                     orig_size,
                     interp_mode,
-                    aa,
                 )  # [N, 1, H, W]
                 dense_np = self.image_processor.pt_to_numpy(dense)  # [N, H, W, 1]
                 dense_np = np.squeeze(dense_np, axis=-1)  # [N, H, W]
