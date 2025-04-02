@@ -9,7 +9,6 @@ import click
 import cv2
 import imagesize
 import numpy as np
-from PIL import Image
 
 NPARRAY_EXTENSIONS = [".npy", ".npz", ".bl2"]
 
@@ -23,54 +22,6 @@ CAMERA_CATEGORIES = [
     "CAM_BACK_WIDE",
     "CAM_BACK_NARROW",
 ]
-
-
-def crop_center(
-    image: np.ndarray, height_ratio: float, width_ratio: float
-) -> np.ndarray:
-    """Perform center crop on an image array.
-
-    Args:
-        image (np.ndarray): Input image array with shape (N, H, W) or (N, H, W, C).
-        height_ratio (float): Ratio of height to keep (0.0 to 1.0).
-        width_ratio (float): Ratio of width to keep (0.0 to 1.0).
-
-    Returns:
-        np.ndarray: Center cropped image with the same number of dimensions as input.
-
-    Raises:
-        ValueError: If height_ratio or width_ratio is not between 0 and 1.
-        ValueError: If image dimensions are not valid (must be 3D or 4D).
-
-    Examples:
-        >>> # Crop a batch of RGB images to 80% of height and 60% of width
-        >>> cropped = crop_center(images, 0.8, 0.6)
-    """
-    if not (0.0 < height_ratio <= 1.0) or not (0.0 < width_ratio <= 1.0):
-        raise ValueError("Height and width ratios must be between 0 and 1")
-
-    if image.ndim not in (3, 4):
-        raise ValueError(f"Expected 3D or 4D array, got {image.ndim}D")
-
-    # Get original dimensions
-    if image.ndim == 3:  # (N, H, W)
-        _, h, w = image.shape
-    else:  # (N, H, W, C)
-        _, h, w, _ = image.shape
-
-    # Calculate new dimensions
-    new_h = int(h * height_ratio)
-    new_w = int(w * width_ratio)
-
-    # Calculate start indices for cropping
-    start_h = (h - new_h) // 2
-    start_w = (w - new_w) // 2
-
-    # Perform the crop
-    if image.ndim == 3:
-        return image[:, start_h : start_h + new_h, start_w : start_w + new_w]
-    else:
-        return image[:, start_h : start_h + new_h, start_w : start_w + new_w, :]
 
 
 def load_csv(path: Path, columns: dict[str, type]) -> dict[str, list[Any]]:
@@ -186,7 +137,7 @@ def load_arrays(paths: list[Path], num_threads: int = 1) -> list[np.ndarray]:
             Defaults to 1.
 
     Returns:
-        list[np.ndarray]: A list of loaded numpy arrays.
+        list[np.ndarray]: A list of loaded numpy arrays in the same order as the input paths.
 
     Example:
         >>> # Load multiple arrays in parallel
@@ -208,15 +159,10 @@ def load_arrays(paths: list[Path], num_threads: int = 1) -> list[np.ndarray]:
     if num_threads == 1:
         return [load_array(path) for path in paths]
 
-    # Use ThreadPoolExecutor for parallel loading
-    results = []
+    # Use ThreadPoolExecutor for parallel loading with executor.map to preserve order
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-        # Submit all tasks and collect futures
-        future_to_path = {executor.submit(worker, path): path for path in paths}
-
-        # Collect results as they complete
-        for future in concurrent.futures.as_completed(future_to_path):
-            results.append(future.result())
+        # map preserves the order of the input paths in the results
+        results = list(executor.map(worker, paths))
 
     return results
 
@@ -389,24 +335,11 @@ class CommaSeparated(click.ParamType):
             )
 
 
-def is_empty_img(img: Image.Image) -> bool:
-    """Check if a PIL Image is empty (all values are 0).
-
-    Args:
-        img (Image.Image): Input PIL Image
-
-    Returns:
-        bool: True if image is empty (all values are 0), False otherwise
-    """  # noqa: E501
-    return not np.any(np.array(img))
-
-
-def load_img(path: Path, mode: str | None = None) -> tuple[np.ndarray, bool]:
-    """Load an image from a file path and check if it's empty.
+def load_img(path: Path, mode: str | None = None) -> np.ndarray | None:
+    """Load an image from a file path.
 
     Opens an image file using OpenCV and optionally converts it to a specific color mode.
-    Also checks if the image is empty (all values are 0).
-    Returns the image as a numpy array.
+    Returns the image as a numpy array, or None if the image is empty or couldn't be loaded.
 
     Args:
         path (Path): Path to the image file to load
@@ -416,24 +349,28 @@ def load_img(path: Path, mode: str | None = None) -> tuple[np.ndarray, bool]:
             Defaults to None.
 
     Returns:
-        tuple[np.ndarray, bool]: A tuple containing:
-            - The loaded image as a numpy array
-            - A boolean indicating if the image is non-empty (True) or empty (False)
+        np.ndarray | None: The loaded image as a numpy array, or None if the image
+            is empty or couldn't be loaded.
 
     Example:
         >>> # Load RGB image
-        >>> img, is_valid = load_img(Path("image.jpg"), mode="RGB")
+        >>> img = load_img(Path("image.jpg"), mode="RGB")
+        >>> if img is not None:
+        ...     # Process valid image
+        ...     pass
         >>> # Load BGR image (OpenCV default)
-        >>> img, is_valid = load_img(Path("image.jpg"), mode="BGR")
+        >>> img = load_img(Path("image.jpg"), mode="BGR")
         >>> # Load grayscale image
-        >>> img, is_valid = load_img(Path("depth.png"), mode="L")
+        >>> img = load_img(Path("depth.png"), mode="L")
         >>> # Auto-detect mode based on channels
-        >>> img, is_valid = load_img(Path("image.jpg"))
+        >>> img = load_img(Path("image.jpg"))
     """  # noqa: E501
+    if not is_img_file(path):
+        return None
     img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if img is None:
-        # Return empty array if image couldn't be loaded
-        return np.array([]), False
+        # Return None if image couldn't be loaded
+        return None
 
     # Determine mode automatically if not specified
     if mode is None:
@@ -455,18 +392,18 @@ def load_img(path: Path, mode: str | None = None) -> tuple[np.ndarray, bool]:
 
     # Check if image is empty (all zeros)
     if not np.any(img):
-        return img, False
-    return img, True
+        return None
+    return img
 
 
 def load_imgs(
     paths: list[Path], mode: str | None = None, num_threads: int = 1
-) -> list[tuple[np.ndarray, bool]]:
+) -> list[np.ndarray | None]:
     """Load multiple images from file paths in parallel using multithreading.
 
     Opens multiple image files using OpenCV in parallel and optionally converts them
-    to a specific color mode. Returns a list of tuples containing the loaded images
-    as numpy arrays and boolean flags indicating if each image is empty.
+    to a specific color mode. Returns a list of loaded images as numpy arrays or None
+    for images that couldn't be loaded.
 
     Args:
         paths (list[Path]): List of paths to the image files to load
@@ -478,21 +415,18 @@ def load_imgs(
             Defaults to 1.
 
     Returns:
-        list[tuple[np.ndarray, bool]]: A list of tuples, each containing:
-            - The loaded image as a numpy array
-            - A boolean indicating if the image is non-empty (True) or empty (False)
+        list[np.ndarray | None]: A list of loaded images as numpy arrays, or None for
+            images that couldn't be loaded.
 
     Example:
         >>> # Load multiple RGB images in parallel
         >>> image_paths = [Path("image1.jpg"), Path("image2.jpg"), Path("image3.jpg")]
-        >>> images_with_flags = load_imgs(image_paths, mode="RGB", num_threads=8)
-        >>> for img, is_valid in images_with_flags:
-        ...     if is_valid:
+        >>> results = load_imgs(image_paths, mode="RGB", num_threads=8)
+        >>> for img in results:
+        ...     if img is not None:
         ...         # Process valid image
         ...         pass
     """  # noqa: E501
-    import concurrent.futures
-
     if not paths:
         return []
 
@@ -501,121 +435,58 @@ def load_imgs(
         return [load_img(path, mode) for path in paths]
 
     # Define worker function that calls load_img
-    def worker(path: Path) -> tuple[np.ndarray, bool]:
+    def worker(path: Path) -> np.ndarray | None:
         return load_img(path, mode)
 
-    # Use ThreadPoolExecutor for parallel loading
-    results = []
+    # Use ThreadPoolExecutor for parallel loading with executor.map to preserve order
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-        # Submit all tasks and collect futures
-        future_to_path = {executor.submit(worker, path): path for path in paths}
-
-        # Collect results as they complete
-        for future in concurrent.futures.as_completed(future_to_path):
-            results.append(future.result())
+        # map preserves the order of the input paths in the results
+        results = list(executor.map(worker, paths))
 
     return results
 
 
 def make_grid(
     imgs: np.ndarray,
-    rows: int | None = None,
-    cols: int | None = None,
+    rows: int,
+    cols: int,
     resize: tuple[int, int] | None = None,
-    interpolation: int | list[int] = cv2.INTER_LINEAR,
+    interpolation: int = cv2.INTER_LINEAR,
 ) -> np.ndarray:
     """Create a grid of images from a numpy array.
 
-    Takes a batch of images and arranges them in a grid pattern. Can optionally resize
-    the final grid output.
-
     Args:
-        imgs (np.ndarray): Array of images with shape (N,H,W,C) where:
-            N is number of images
-            H is height of each image
-            W is width of each image
-            C is number of channels per image
-        rows (int | None, optional): Number of rows in output grid. If None:
-            - Will be calculated from cols if cols is specified
-            - Will create a square-ish grid if cols is also None
-        cols (int | None, optional): Number of columns in output grid. If None:
-            - Will be calculated from rows if rows is specified
-            - Will create a square-ish grid if rows is also None
-        resize (tuple[int, int] | None, optional): Target (height, width) to resize final grid to.
-            - If None: No resizing is performed
-            - If either dimension is -1: That dimension is calculated to preserve aspect ratio
-            - If both dimensions are -1: No resizing is performed
-        interpolation (cv2.InterpolationFlags | list[cv2.InterpolationFlags], optional):
-            OpenCV interpolation method(s) for resizing. Can be either:
-            - A single interpolation flag to use for all images
-            - A list of flags matching the number of input images
-            Defaults to cv2.INTER_LINEAR.
+        imgs (np.ndarray): Array of images with shape (N,H,W,C)
+        rows (int): Number of rows in output grid
+        cols (int): Number of columns in output grid
+        resize (tuple[int, int] | None): Target (height, width) to resize final grid to.
+            If None: No resizing is performed
+            If either dimension is -1: That dimension is calculated to preserve aspect ratio
+        interpolation (int): OpenCV interpolation method for resizing
 
     Returns:
-        np.ndarray: Grid image with shape (grid_height, grid_width, C) containing all input
-            images arranged in a grid pattern.
-
-    Raises:
-        ValueError: If imgs is empty or not a 4D array
-        ValueError: If a list of interpolation methods is provided but length doesn't match
-            number of input images
-
-    Example:
-        >>> # Create 2x2 grid from 4 images
-        >>> grid = make_grid(images, rows=2, cols=2)
-        >>> # Create auto-sized grid, resized to 512x512
-        >>> grid = make_grid(images, resize=(512,512))
-        >>> # Create grid with different interpolation per image
-        >>> grid = make_grid(images, interpolation=[cv2.INTER_LINEAR, cv2.INTER_NEAREST])
-    """  # noqa: E501
+        np.ndarray: Grid image with shape (grid_height, grid_width, C)
+    """
     if imgs.size == 0 or len(imgs.shape) != 4:
         raise ValueError("Images must be non-empty 4D array (N,H,W,C)")
 
     n = imgs.shape[0]
-    if isinstance(interpolation, Sequence) and len(interpolation) != n:
-        raise ValueError(
-            f"Interpolation list length ({len(interpolation)}) "
-            "must match number of images ({n})"
-        )
-
-    # Calculate grid dimensions
-    if rows is None and cols is None:
-        cols = int(np.ceil(np.sqrt(n)))
-    if rows is None:
-        rows = int(np.ceil(n / cols))
-    if cols is None:
-        cols = int(np.ceil(n / rows))
-
     h, w = imgs.shape[1:3]
-    grid_h, grid_w = h * rows, w * cols
 
-    # Calculate target size for the grid
+    # Create grid
+    grid = np.zeros((h * rows, w * cols) + imgs.shape[3:], dtype=imgs.dtype)
+    for idx in range(min(n, rows * cols)):
+        i, j = idx // cols, idx % cols
+        grid[i * h : (i + 1) * h, j * w : (j + 1) * w] = imgs[idx]
+
+    # Resize the grid after creation
     if resize is not None:
         th, tw = resize
         if th != -1 or tw != -1:
-            methods = (
-                interpolation
-                if isinstance(interpolation, Sequence)
-                else [interpolation] * n
-            )
-            target_h = th if th != -1 else int(tw * grid_h / grid_w)
-            target_w = tw if tw != -1 else int(th * grid_w / grid_h)
-            # Calculate individual image size based on grid target size
-            h = target_h // rows
-            w = target_w // cols
-            # Resize all images to the new size
-            imgs = np.array(
-                [
-                    cv2.resize(img, (w, h), interpolation=method)
-                    for img, method in zip(imgs, methods, strict=True)
-                ]
-            )
-
-    # Create and fill grid
-    grid = np.zeros((h * rows, w * cols) + imgs.shape[3:], dtype=imgs.dtype)
-    for idx in range(n):
-        i, j = idx // cols, idx % cols
-        grid[i * h : (i + 1) * h, j * w : (j + 1) * w] = imgs[idx]
+            # Preserve aspect ratio if either dimension is -1
+            target_h = th if th != -1 else int(tw * grid.shape[0] / grid.shape[1])
+            target_w = tw if tw != -1 else int(th * grid.shape[1] / grid.shape[0])
+            grid = cv2.resize(grid, (target_w, target_h), interpolation=interpolation)
 
     return grid
 
@@ -630,47 +501,6 @@ def has_nan(x: np.ndarray) -> bool:
         bool: True if array contains NaN values, False otherwise
     """  # noqa: E501
     return np.isnan(x).any()
-
-
-def reduce(x: np.ndarray, method: str, axis: int | None = None) -> float:
-    """Reduce a numpy array using the specified method along an optional axis.
-
-    Args:
-        x (np.ndarray): Input array to reduce
-        method (str): Reduction method to use. Must be one of:
-            - "mean": Calculate arithmetic mean
-            - "median": Calculate median value
-            - "min": Find minimum value
-            - "max": Find maximum value
-            - "std": Calculate standard deviation
-        axis (int | None, optional): Axis along which to perform reduction.
-            If None, reduction is performed over the entire array. Defaults to None.
-
-    Returns:
-        float: Result of the reduction operation
-
-    Raises:
-        ValueError: If an invalid reduction method is specified
-
-    Examples:
-        >>> x = np.array([[1, 2, 3], [4, 5, 6]])
-        >>> reduce(x, "mean")  # Mean of entire array
-        3.5
-        >>> reduce(x, "max", axis=0)  # Max along first axis
-        array([4., 5., 6.])
-    """  # noqa: E501
-    if method == "mean":
-        return float(np.mean(x, axis=axis))
-    elif method == "median":
-        return float(np.median(x, axis=axis))
-    elif method == "min":
-        return float(np.min(x, axis=axis))
-    elif method == "max":
-        return float(np.max(x, axis=axis))
-    elif method == "std":
-        return float(np.std(x, axis=axis))
-    else:
-        raise ValueError(f"Invalid reduction method: {method}")
 
 
 def to_depth_map(

@@ -4,12 +4,12 @@ from pathlib import Path
 from typing import Any
 
 import click
+import cv2
 import numpy as np
 import torch
 import tqdm
 from diffusers import AutoencoderTiny, DDIMScheduler
 from loguru import logger
-from PIL import Image
 
 import utils
 from marigold_dc import (
@@ -74,7 +74,8 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     "--res",
     type=click.IntRange(min=1),
     default=768,
-    help="Input resolution. Input images will be resized to ${res} x ${res}.",
+    help="Input resolution. Input images will be resized so "
+    "that the longer side has length ${res}.",
     show_default=True,
 )
 @click.option(
@@ -91,6 +92,17 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     default=True,
     show_default=True,
     help="Whether to save visualization of inferenced dense depth maps.",
+)
+@click.option(
+    "-vr",
+    "--vis-res",
+    type=click.Tuple([int, int]),
+    default=(512, -1),
+    help="Resolution (height, width)of visualization of inferenced dense depth maps. "
+    "This option is valid when --vis=True. "
+    "If one side is -1, the other side will be scaled to preserve the aspect ratio "
+    "of the input images.",
+    show_default=True,
 )
 @click.option(
     "-vr",
@@ -229,6 +241,7 @@ def main(
     max_depth: float,
     save_dense: bool,
     vis: bool,
+    vis_res: tuple[int, int],
     log: Path | None,
     log_level: str,
     precision: str,
@@ -364,10 +377,8 @@ def main(
             utils.NPARRAY_EXTENSIONS,
         )
         if sparse_path is None:
-            logger.warning(f"No depth map found for image {path} (skipped)")
+            logger.warning(f"No sparse depth map found for image {path} (skipped)")
             continue
-        img_paths.append(path)
-        sparse_paths.append(sparse_path)
         if seg_dir is not None:
             seg_path = utils.find_file_with_exts(
                 (seg_dir / path.relative_to(img_dir)).with_suffix(".npy"),
@@ -377,6 +388,8 @@ def main(
                 logger.warning(f"No segmentation map found for image {path} (skipped)")
                 continue
             seg_paths.append(seg_path)
+        sparse_paths.append(sparse_path)
+        img_paths.append(path)
     if len(img_paths) == 0:
         logger.critical("No valid input pairs found")
         sys.exit(1)
@@ -405,16 +418,21 @@ def main(
         ret = utils.load_imgs(
             batch_img_paths, mode="RGB", num_threads=len(batch_img_paths)
         )
-        if sum([r[1] for r in ret]) == 0:
-            # Skip to the next batch if all images are invalid
+        if all(img is None for img in ret):
+            logger.warning(
+                f"All images in batch {i//batch_size + 1} failed to load (skipped)"
+            )
             progbar.update(bs)
             continue
-        batch_img_paths = [batch_img_paths[j] for j in range(len(ret)) if ret[j][1]]
-        batch_imgs = np.stack([r[0] for r in ret if r[1]], axis=0)
+        # Process loaded images
+        batch_img_paths = [
+            batch_img_paths[j] for j in range(len(ret)) if ret[j] is not None
+        ]
+        batch_imgs = np.stack([img for img in ret if img is not None], axis=0)
 
         # Load sparse depth maps
         batch_sparse_paths = [
-            batch_sparse_paths[j] for j in range(len(ret)) if ret[j][1]
+            batch_sparse_paths[j] for j in range(len(ret)) if ret[j] is not None
         ]
         batch_sparses = np.stack(
             utils.load_arrays(batch_sparse_paths, num_threads=len(batch_sparse_paths)),
@@ -423,7 +441,9 @@ def main(
 
         # Load segmentation maps
         if seg_dir is not None:
-            batch_seg_paths = [batch_seg_paths[j] for j in range(len(ret)) if ret[j][1]]
+            batch_seg_paths = [
+                batch_seg_paths[j] for j in range(len(ret)) if ret[j] is not None
+            ]
             batch_segs = np.stack(
                 utils.load_arrays(batch_seg_paths, num_threads=len(batch_seg_paths)),
                 axis=0,
@@ -516,15 +536,14 @@ def main(
                 dense_vis = pipe.image_processor.visualize_depth(
                     dense, val_min=vis_min, val_max=vis_max
                 )[0]
-                out = Image.fromarray(
-                    utils.make_grid(
-                        np.stack(
-                            [img, sparse_vis, dense_vis],
-                            axis=0,
-                        ),
-                        rows=1,
-                        cols=3,
-                    )
+                out = utils.make_grid(
+                    np.stack(
+                        [img, sparse_vis, dense_vis],
+                        axis=0,
+                    ),
+                    rows=1,
+                    cols=3,
+                    resize=vis_res,
                 )
                 time_vis += time.time() - stime_disk
                 stime_disk = time.time()
@@ -532,7 +551,7 @@ def main(
                 if not save_dir.exists():
                     save_dir.mkdir(parents=True)
                 save_path = save_dir / f"{img_path.stem}_vis.jpg"
-                out.save(save_path)
+                cv2.imwrite(str(save_path), cv2.cvtColor(out, cv2.COLOR_RGB2BGR))
                 time_disk += time.time() - stime_disk
         postfix["time/disk"] = time_disk
         postfix["time/vis"] = time_vis
