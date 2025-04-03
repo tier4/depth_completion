@@ -175,13 +175,6 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "--normed",
-    type=bool,
-    default=False,
-    help="Whether to predict dense depth maps in normalized [0, 1] range.",
-    show_default=True,
-)
-@click.option(
     "--overlay-sparse",
     type=bool,
     default=False,
@@ -237,7 +230,6 @@ def main(
     elemwise_scaling: bool,
     interp_mode: str,
     loss_funcs: list[str],
-    normed: bool,
     overlay_sparse: bool,
     opt: str,
     lr_latent: float,
@@ -471,10 +463,6 @@ def main(
                 batch_segs = batch_segs
             time_disk = time.time() - stime_disk
 
-            # Normalize
-            if normed:
-                batch_sparses /= max_depth
-
             ############################################################
             # Add guides to sparse depth map
             ############################################################
@@ -492,6 +480,7 @@ def main(
             batch_denses: np.ndarray = pipe(
                 np.expand_dims(batch_imgs, axis=1),
                 np.expand_dims(batch_sparses, axis=1),
+                max_depth=max_depth,
                 steps=steps,
                 resolution=res,
                 elemwise_scaling=elemwise_scaling,
@@ -502,9 +491,6 @@ def main(
             )[
                 :, 0
             ]  # [N, H, W]
-            if normed:
-                batch_denses *= max_depth
-                batch_sparses *= max_depth
             postfix["time/infer"] = time.time() - stime_disk
 
             ############################################################

@@ -137,6 +137,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
     3. Using a parametrized affine transformation to convert from the model's
        depth representation to metric depth values
     4. Iteratively refining the prediction through a guided diffusion process
+
+    The pipeline supports processing sequences of images and sparse depth maps,
+    with optional temporal consistency between frames using momentum.
     """  # noqa: E501
 
     def _affine_to_metric(
@@ -214,6 +217,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         self,
         imgs: np.ndarray,
         sparses: np.ndarray,
+        max_depth: float | None = None,
         steps: int = 50,
         resolution: int = 768,
         seed: int = 2024,
@@ -234,6 +238,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 representing a sequence of sparse depth maps.
                 Should have zeros at missing positions and positive values at
                 measurement points.
+            max_depth (float | None, optional): Maximum depth value for normalization.
+                If None, uses per-sample maximum. Defaults to None.
             steps (int, optional): Number of denoising steps.
                 Higher values give better quality but slower inference.
                 Defaults to 50.
@@ -337,7 +343,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         pred_latent_prev: torch.Tensor | None = None
 
         # Iterate over sequence length
-        ret: list[np.ndarray] = []
+        ret: list[torch.Tensor] = []
         for frame_idx in range(L):
             # Get current image and sparse depth
             img: torch.Tensor = imgs[:, frame_idx]  # [N, C, H, W]
@@ -350,6 +356,19 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 device=device,
                 dtype=self.dtype,
             )  # [N, C, PPH, PPW]
+
+            # Preprocess sparse depth maps
+            if max_depth is None:
+                # Normalize by per-sample max
+                max_depths = torch.amax(
+                    sparse, dim=(1, 2, 3), keepdim=True
+                )  # [N, 1, 1, 1]
+            else:
+                # Normalize by absolute max specified by user
+                max_depths = (
+                    torch.ones(len(sparse), 1, 1, 1, device=sparse.device) * max_depth
+                )  # [N, 1, 1, 1]
+            sparse /= max_depths
 
             # Get latent encodings
             with torch.no_grad():
@@ -494,7 +513,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     orig_size,
                     interp_mode,
                 )  # [N, 1, H, W]
-                dense_np = self.image_processor.pt_to_numpy(dense)  # [N, H, W, 1]
-                dense_np = np.squeeze(dense_np, axis=-1)  # [N, H, W]
-                ret.append(np.expand_dims(dense_np, axis=1))  # [N, 1, H, W]
-        return np.concatenate(ret, axis=1)  # [N, L, H, W]
+                # Decode
+                dense *= max_depths
+                ret.append(dense)
+        dense = torch.cat(ret, dim=1)  # [N, L, H, W]
+        return dense.cpu().numpy()
