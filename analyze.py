@@ -1,6 +1,7 @@
+import json
 import sys
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import click
 import numpy as np
@@ -183,8 +184,11 @@ def main(
         # Print overall scores
         logger.info("Overall scores:")
         logger.info(f"  0.0 < x <= {max_depth:.1f} [m]:")
+        results: dict[str, Any] = {"overall": {}}
         for metric in metrics:
-            logger.info(f"    {metric}: {np.mean(scores_overall[metric]):.2f}")
+            score = float(np.mean(scores_overall[metric]))
+            results["overall"][metric] = score
+            logger.info(f"    {metric}: {score:.2f}")
 
         # Compute bin-wise metrics if requested
         if calc_binned_scores:
@@ -227,8 +231,10 @@ def main(
 
             # Print binned scores
             logger.info("Binned scores:")
+            results["binned"] = []
             for bin_idx, lower in enumerate(lowers):
                 upper = min(lower + bin_size, max_depth)
+                result: dict[str, Any] = {"range": (lower, upper), "metrics": {}}
                 if bin_idx == 0:
                     if len(lowers) == 1:
                         logger.info(f"  {lower:.1f} < x <= {upper:.1f} [m]:")
@@ -239,9 +245,15 @@ def main(
                 else:
                     logger.info(f"  {lower:.1f} <= x < {upper:.1f} [m]:")
                 for metric in metrics:
-                    logger.info(
-                        f"    {metric}: {np.mean(scores_binned[bin_idx][metric]):.2f}"
-                    )
+                    score = float(np.mean(scores_binned[bin_idx][metric]))
+                    result["metrics"][metric] = score
+                    logger.info(f"    {metric}: {score:.2f}")
+                results["binned"].append(result)
+        # Save results
+        save_path = result_dir / "results.json"
+        with save_path.open("w") as f:
+            json.dump(results, f, indent=2)
+        logger.info(f"Saved analysis results to {save_path}")
 
 
 if __name__ == "__main__":
