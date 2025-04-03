@@ -67,6 +67,14 @@ Metric = Literal["mae", "rmse"]
     help="Maximum distance in meters of depth maps.",
     show_default=True,
 )
+@click.option(
+    "-bs",
+    "--batch-size",
+    type=click.IntRange(min=1),
+    default=4,
+    help="Batch size for loading sparse & dense depth maps.",
+    show_default=True,
+)
 def main(
     dataset_root: Path,
     result_root: Path,
@@ -78,6 +86,7 @@ def main(
     ],
     bin_size: float,
     max_depth: float,
+    batch_size: int,
 ) -> None:
     # Set log level
     logger.remove()
@@ -109,6 +118,11 @@ def main(
         sys.exit(1)
 
     # Evaluation
+    bin_ranges = utils.calc_bins(0, max_depth, bin_size)
+    scores_overall_all: dict[Metric, list[float]] = {metric: [] for metric in metrics}
+    scores_binned_all: list[dict[Metric, list[float]]] = [
+        {metric: [] for metric in metrics} for _ in range(len(bin_ranges))
+    ]
     for dataset_dir in dataset_dirs:
         result_dir = result_root / (dataset_dir.relative_to(dataset_root))
         if not result_dir.exists():
@@ -120,7 +134,7 @@ def main(
         sparse_dir = dataset_dir / utils.DATASET_DIR_NAME_SPARSE
         dense_dir = result_dir / utils.RESULT_DIR_NAME_DENSE
 
-        # Load sparse and dense depth maps
+        # Find paths to sparse and dense depth maps
         sparse_paths: list[Path] = []
         dense_paths: list[Path] = []
         cache: set[str] = set()
@@ -159,31 +173,40 @@ def main(
             f"depth maps for {dataset_dir.name}"
         )
 
-        # Compute overall metrics for each pair
+        # Compute overall metrics
         scores_overall: dict[Metric, list[float]] = {metric: [] for metric in metrics}
         progbar = tqdm.tqdm(
             total=len(sparse_paths),
             desc="Computing overall metrics...",
             dynamic_ncols=True,
         )
-        for sparse_path, dense_path in zip(sparse_paths, dense_paths, strict=True):
-            sparse_map = utils.load_array(sparse_path)
-            dense_map = utils.load_array(dense_path)
+        for i in range(0, len(sparse_paths), batch_size):
+            batch_sparse_paths = sparse_paths[i : i + batch_size]
+            batch_dense_paths = dense_paths[i : i + batch_size]
+            batch_sparses = np.stack(
+                utils.load_arrays(batch_sparse_paths),
+                axis=0,
+            )
+            batch_denses = np.stack(
+                utils.load_arrays(batch_dense_paths),
+                axis=0,
+            )
 
             # Compute overall metrics
             for metric in metrics:
-                mask = (sparse_map > 0) & (sparse_map <= max_depth)
+                mask = (batch_sparses > 0) & (batch_sparses <= max_depth)
                 if metric == "mae":
-                    score = utils.mae(dense_map, sparse_map, mask=mask)
+                    score = utils.mae(batch_denses, batch_sparses, mask=mask)
                 else:
-                    score = utils.rmse(dense_map, sparse_map, mask=mask)
+                    score = utils.rmse(batch_denses, batch_sparses, mask=mask)
                 scores_overall[metric].append(score)
-            progbar.update(1)
+                scores_overall_all[metric].append(score)
+            progbar.update(len(batch_sparse_paths))
         progbar.close()
 
         # Print overall scores
-        logger.info("Overall scores:")
-        logger.info(f"  0.0 < x <= {max_depth:.1f} [m]:")
+        logger.info(f"[{dataset_dir.name}]:")
+        logger.info(f"  0.0 < x <= {max_depth:.1f}:")
         results: dict[str, Any] = {"overall": {}}
         for metric in metrics:
             score = float(np.mean(scores_overall[metric]))
@@ -192,8 +215,6 @@ def main(
 
         # Compute bin-wise metrics if requested
         if calc_binned_scores:
-            # Calculate bin boundaries
-            bin_ranges = utils.calc_bins(0, max_depth, bin_size)
             scores_binned: list[dict[Metric, list[float]]] = [
                 {metric: [] for metric in metrics} for _ in range(len(bin_ranges))
             ]
@@ -203,32 +224,41 @@ def main(
                 desc="Computing binned metrics...",
                 dynamic_ncols=True,
             )
-            for sparse_path, dense_path in zip(sparse_paths, dense_paths, strict=True):
-                sparse_map = utils.load_array(sparse_path)
-                dense_map = utils.load_array(dense_path)
+            for i in range(0, len(sparse_paths), batch_size):
+                batch_sparse_paths = sparse_paths[i : i + batch_size]
+                batch_dense_paths = dense_paths[i : i + batch_size]
+                batch_sparses = np.stack(
+                    utils.load_arrays(batch_sparse_paths),
+                    axis=0,
+                )
+                batch_denses = np.stack(
+                    utils.load_arrays(batch_dense_paths),
+                    axis=0,
+                )
 
                 # Compute bin-wise metrics
                 for bin_idx, bin_range in enumerate(bin_ranges):
                     lower, upper = bin_range
-                    mask = (sparse_map > lower) & (sparse_map <= upper)
+                    mask = (batch_sparses > lower) & (batch_sparses <= upper)
                     if not np.any(mask):
                         continue
                     for metric in metrics:
                         if metric == "mae":
-                            score = utils.mae(dense_map, sparse_map, mask=mask)
+                            score = utils.mae(batch_denses, batch_sparses, mask=mask)
                         else:
-                            score = utils.rmse(dense_map, sparse_map, mask=mask)
+                            score = utils.rmse(batch_denses, batch_sparses, mask=mask)
                         scores_binned[bin_idx][metric].append(score)
-                progbar.update(1)
+                        scores_binned_all[bin_idx][metric].append(score)
+                progbar.update(len(batch_sparse_paths))
             progbar.close()
 
             # Print binned scores
-            logger.info("Binned scores:")
+            logger.info(f"[{dataset_dir.name}]:")
             results["binned"] = []
             for bin_idx, bin_range in enumerate(bin_ranges):
                 lower, upper = bin_range
                 result: dict[str, Any] = {"range": (lower, upper), "metrics": {}}
-                logger.info(f"  {lower:.1f} < x <= {upper:.1f} [m]:")
+                logger.info(f"  {lower:.1f} < x <= {upper:.1f}:")
                 for metric in metrics:
                     score = float(np.mean(scores_binned[bin_idx][metric]))
                     result["metrics"][metric] = score
@@ -238,7 +268,33 @@ def main(
         save_path = result_dir / "results.json"
         with save_path.open("w") as f:
             json.dump(results, f, indent=2)
-        logger.info(f"Saved analysis results to {save_path}")
+        logger.success(f"Saved analysis results to {save_path}")
+
+    # Calculate scores for all datasets
+    logger.info("[All]:")
+    logger.info(f"  0.0 < x <= {max_depth:.1f}:")
+    results_all: dict[str, Any] = {"overall": {}, "binned": []}
+    for metric in metrics:
+        score = float(np.mean(scores_overall_all[metric]))
+        results_all["overall"][metric] = score
+        logger.info(f"    {metric}: {score:.2f}")
+    if calc_binned_scores:
+        logger.info("[All]:")
+        for bin_idx, bin_range in enumerate(bin_ranges):
+            lower, upper = bin_range
+            result = {"range": bin_range, "metrics": {}}
+            logger.info(f"  {lower:.1f} < x <= {upper:.1f}:")
+            for metric in metrics:
+                score = float(np.mean(scores_binned_all[bin_idx][metric]))
+                result["metrics"][metric] = score
+                logger.info(f"    {metric}: {score:.2f}")
+            results_all["binned"].append(result)
+
+    # Save results for all datasets
+    save_path = result_root / "results_all.json"
+    with save_path.open("w") as f:
+        json.dump(results_all, f, indent=2)
+    logger.success(f"Saved analysis results for all datasets to {save_path}")
 
 
 if __name__ == "__main__":
