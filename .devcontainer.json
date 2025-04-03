@@ -43,8 +43,6 @@
         "python.analysis.indexing": false,
         // Auto Indent
         "python.analysis.autoIndent": true,
-        // Type Checking
-        "python.analysis.typeCheckingMode": "off",
         // Auto import
         "python.analysis.autoImportCompletions": false,
         "editor.formatOnSave": true,
