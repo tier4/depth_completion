@@ -174,10 +174,10 @@ def main(
             for metric in metrics:
                 mask = (sparse_map > 0) & (sparse_map <= max_depth)
                 if metric == "mae":
-                    loss = utils.mae(dense_map, sparse_map, mask=mask)
+                    score = utils.mae(dense_map, sparse_map, mask=mask)
                 else:
-                    loss = utils.rmse(dense_map, sparse_map, mask=mask)
-                scores_overall[metric].append(loss)
+                    score = utils.rmse(dense_map, sparse_map, mask=mask)
+                scores_overall[metric].append(score)
             progbar.update(1)
         progbar.close()
 
@@ -193,13 +193,10 @@ def main(
         # Compute bin-wise metrics if requested
         if calc_binned_scores:
             # Calculate bin boundaries
-            scores_binned: list[dict[Metric, list[float]]] = []
-            lowers: list[float] = [0.0]
-            while lowers[-1] < max_depth:  # NOTE: Calc lower bounds of bins
-                lowers.append(lowers[-1] + bin_size)
-            lowers.pop()  # NOTE: Remove last lower bound
-            for _ in lowers:
-                scores_binned.append({metric: [] for metric in metrics})
+            bin_ranges = utils.calc_bins(0, max_depth, bin_size)
+            scores_binned: list[dict[Metric, list[float]]] = [
+                {metric: [] for metric in metrics} for _ in range(len(bin_ranges))
+            ]
 
             progbar = tqdm.tqdm(
                 total=len(sparse_paths),
@@ -211,39 +208,27 @@ def main(
                 dense_map = utils.load_array(dense_path)
 
                 # Compute bin-wise metrics
-                mask_base = (sparse_map > 0) & (sparse_map <= max_depth)
-                for bin_idx, lower in enumerate(lowers):
-                    upper = min(lower + bin_size, max_depth)
-                    if bin_idx == len(lowers) - 1:
-                        mask = mask_base & (lower <= sparse_map)
-                    else:
-                        mask = mask_base & (lower <= sparse_map) & (sparse_map < upper)
+                for bin_idx, bin_range in enumerate(bin_ranges):
+                    lower, upper = bin_range
+                    mask = (sparse_map > lower) & (sparse_map <= upper)
                     if not np.any(mask):
                         continue
                     for metric in metrics:
                         if metric == "mae":
-                            loss = utils.mae(dense_map, sparse_map, mask=mask)
+                            score = utils.mae(dense_map, sparse_map, mask=mask)
                         else:
-                            loss = utils.rmse(dense_map, sparse_map, mask=mask)
-                        scores_binned[bin_idx][metric].append(loss)
+                            score = utils.rmse(dense_map, sparse_map, mask=mask)
+                        scores_binned[bin_idx][metric].append(score)
                 progbar.update(1)
             progbar.close()
 
             # Print binned scores
             logger.info("Binned scores:")
             results["binned"] = []
-            for bin_idx, lower in enumerate(lowers):
-                upper = min(lower + bin_size, max_depth)
+            for bin_idx, bin_range in enumerate(bin_ranges):
+                lower, upper = bin_range
                 result: dict[str, Any] = {"range": (lower, upper), "metrics": {}}
-                if bin_idx == 0:
-                    if len(lowers) == 1:
-                        logger.info(f"  {lower:.1f} < x <= {upper:.1f} [m]:")
-                    else:
-                        logger.info(f"  {lower:.1f} < x < {upper:.1f} [m]:")
-                elif bin_idx == len(lowers) - 1:
-                    logger.info(f"  {lower:.1f} <= x <= {upper:.1f} [m]:")
-                else:
-                    logger.info(f"  {lower:.1f} <= x < {upper:.1f} [m]:")
+                logger.info(f"  {lower:.1f} < x <= {upper:.1f} [m]:")
                 for metric in metrics:
                     score = float(np.mean(scores_binned[bin_idx][metric]))
                     result["metrics"][metric] = score

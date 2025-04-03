@@ -30,6 +30,37 @@ CAMERA_CATEGORIES = [
 ]
 
 
+def calc_bins(
+    lower_bound: float, upper_bound: float, bin_size: float
+) -> list[tuple[float, float]]:
+    """Calculate bin ranges from lower bound to upper bound with specified bin size.
+
+    This function divides a range into bins of equal size. Each bin is represented
+    as a tuple of (lower, upper) bounds. The last bin may be smaller than bin_size
+    if the range is not evenly divisible.
+
+    Args:
+        lower_bound (float): The starting value for the first bin
+        upper_bound (float): The maximum value (inclusive) for the last bin
+        bin_size (float): The size of each bin
+
+    Returns:
+        list[tuple[float, float]]: List of (lower, upper) bound tuples for each bin
+
+    Raises:
+        ValueError: If lower_bound is greater than or equal to upper_bound
+    """
+    if lower_bound >= upper_bound:
+        raise ValueError(
+            f"Lower bound {lower_bound} must be less than upper bound {upper_bound}"
+        )
+    bins: list[tuple[float, float]] = []
+    while lower_bound < upper_bound:
+        bins.append((lower_bound, min(lower_bound + bin_size, upper_bound)))
+        lower_bound += bin_size
+    return bins
+
+
 def is_dataset_dir(path: Path) -> bool:
     """Check if a path points to a valid dataset directory.
 
