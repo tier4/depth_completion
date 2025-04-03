@@ -226,6 +226,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         opt: str = "adam",
         lr: tuple[float, float] | None = None,
         beta: float = 0.9,
+        kl_penalty: bool = False,
+        kl_weight: float = 0.1,
     ) -> np.ndarray:
         """
         Perform depth completion on a sequence of RGB images using sparse depth measurements.
@@ -257,6 +259,11 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 Defaults to (0.05, 0.005).
             beta (float, optional): Momentum factor for prediction latents between
                 frames in a sequence. Must be in range [0, 1]. Defaults to 0.9.
+            kl_penalty (bool, optional): Whether to apply KL divergence penalty to
+                keep the distribution of prediction latents close to N(0,1).
+                Defaults to False.
+            kl_weight (float, optional): Weight for the KL divergence penalty term.
+                Only used when kl_penalty is True. Defaults to 0.1.
 
         Returns:
             np.ndarray: Dense depth prediction of shape [N, L, H, W].
@@ -443,7 +450,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     noise, t, pred_latent, generator=generator
                 ).pred_original_sample  # [N, 4, EH, EW]
 
-                # Decode to metric space, compute loss with guidance and backpropagate
+                # Decode to metric space, compute loss with guidance
                 dense = self.latent_to_metric(
                     preview,
                     scale,
@@ -455,6 +462,16 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     interp_mode,
                 )  # [N, 1, H, W]
                 loss = compute_loss(dense, sparse, loss_funcs, image=img)
+
+                # NOTE: Add KL divergence penalty to keep
+                # the distribution of pred_latent close to N(0,1)
+                if kl_penalty:
+                    kl_loss = kl_weight * pred_latent.square().mean(
+                        dim=(1, 2, 3), keepdim=True
+                    )
+                    loss = loss + kl_loss
+
+                # Backprop
                 loss.backward(torch.ones_like(loss))  # Preserve batch dimension
 
                 # Scale gradients up

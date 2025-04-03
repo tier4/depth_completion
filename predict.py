@@ -197,6 +197,21 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     help="Learning rate for scale and shift parameters.",
 )
 @click.option(
+    "--kl-penalty",
+    type=bool,
+    default=False,
+    help="Whether to apply KL divergence penalty to keep "
+    "the distribution of prediction latents close to N(0,1).",
+    show_default=True,
+)
+@click.option(
+    "--kl-weight",
+    type=click.FloatRange(min=0, min_open=True),
+    default=0.1,
+    help="Weight for the KL divergence penalty term.",
+    show_default=True,
+)
+@click.option(
     "-bs",
     "--batch-size",
     type=click.IntRange(min=1),
@@ -228,6 +243,8 @@ def main(
     lr_scaling: float,
     vis_range: str,
     batch_size: int,
+    kl_penalty: bool,
+    kl_weight: float,
 ) -> None:
     # Set log level
     logger.remove()
@@ -479,6 +496,8 @@ def main(
                 loss_funcs=loss_funcs,
                 opt=opt,
                 lr=(lr_latent, lr_scaling),
+                kl_penalty=kl_penalty,
+                kl_weight=kl_weight,
             )[
                 :, 0
             ]  # [N, H, W]
