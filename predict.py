@@ -94,6 +94,16 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
+    "-vo",
+    "--vis-order",
+    type=utils.CommaSeparated(str),
+    default="image,sparse,dense",
+    help="Order of visualization of inputs and outputs. "
+    "This option is valid when --vis=True. "
+    "Available options: image,sparse,dense",
+    show_default=True,
+)
+@click.option(
     "-vr",
     "--vis-range",
     type=click.Choice(["abs", "rel"]),
@@ -144,6 +154,13 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     "If npy, saves uncompressed. "
     "This option is ignored if --save-dense=False",
     show_default=True,
+)
+@click.option(
+    "--use-seg",
+    type=bool,
+    default=False,
+    help="Whether to use segmentation maps for depth completion.",
+    show_default=False,
 )
 @click.option(
     "--use-compile",
@@ -230,6 +247,9 @@ def main(
     save_dense: bool,
     vis: bool,
     vis_res: tuple[int, int],
+    vis_range: str,
+    vis_order: list[str],
+    use_seg: bool,
     log: Path | None,
     log_level: str,
     precision: str,
@@ -241,7 +261,6 @@ def main(
     opt: str,
     lr_latent: float,
     lr_scaling: float,
-    vis_range: str,
     batch_size: int,
     kl_penalty: bool,
     kl_weight: float,
@@ -261,6 +280,19 @@ def main(
     if not torch.cuda.is_available():
         logger.critical("CUDA must be available to run this script.")
         sys.exit(1)
+
+    # Check --vis-order args
+    if vis:
+        vis_order_ = []
+        for view in vis_order:
+            if view not in ["image", "sparse", "dense"]:
+                logger.error(f"Invalid order (skipped): {view}")
+                continue
+            vis_order_.append(view)
+        if len(vis_order_) == 0:
+            logger.critical("No valid visualization order specified")
+            sys.exit(1)
+        vis_order = vis_order_
 
     ############################################################
     # Model initialization
@@ -328,7 +360,7 @@ def main(
     logger.info(
         f"Initialized inference pipeline "
         f"(dtype={precision}, vae={vae}, model={model}, "
-        f"loss_funcs={loss_funcs}, batch_size={batch_size})"
+        f"loss_funcs={loss_funcs}, batch_size={batch_size}, use_seg={use_seg})"
     )
 
     ############################################################
@@ -348,7 +380,7 @@ def main(
     for dataset_dir in dataset_dirs:
         # Load segmentation meta file (if provided)
         seg_dir = dataset_dir / utils.DATASET_DIR_NAME_SEG
-        has_seg_dir = seg_dir.exists()
+        has_seg_dir = use_seg and seg_dir.exists()
 
         # Find paths of input images
         img_dir = dataset_dir / utils.DATASET_DIR_NAME_IMAGE
@@ -535,35 +567,41 @@ def main(
 
                 # Save visualization of inferenced depth map
                 if vis:
+                    cat: list[np.ndarray] = []
                     if vis_range == "abs":
                         vis_min, vis_max = 0, max_depth
                     else:
                         vis_min, vis_max = min(dense.min(), sparse.min()), max(
                             dense.max(), sparse.max()
                         )
-                    stime_disk = time.time()
-                    sparse_vis = pipe.image_processor.visualize_depth(
-                        sparse, val_min=vis_min, val_max=vis_max
-                    )[0]
-                    sparse_vis = np.array(sparse_vis)
-                    sparse_vis[sparse <= 0] = 0
-                    # Overlay sparse depth map on visualization of dense depth map
-                    if overlay_sparse:
-                        mask = sparse > 0
-                        dense[mask] = sparse[mask]
-                    dense_vis = pipe.image_processor.visualize_depth(
-                        dense, val_min=vis_min, val_max=vis_max
-                    )[0]
+                    stime_vis = time.time()
+                    for view in vis_order:
+                        if view == "image":
+                            cat.append(img)
+                        elif view == "sparse":
+                            sparse_vis = pipe.image_processor.visualize_depth(
+                                sparse, val_min=vis_min, val_max=vis_max
+                            )[0]
+                            sparse_vis = np.array(sparse_vis)
+                            sparse_vis[sparse <= 0] = 0
+                            cat.append(sparse_vis)
+                        elif view == "dense":
+                            # Overlay sparse depth map on visualization of dense depth map
+                            if overlay_sparse:
+                                mask = sparse > 0
+                                dense[mask] = sparse[mask]
+                            dense_vis = pipe.image_processor.visualize_depth(
+                                dense, val_min=vis_min, val_max=vis_max
+                            )[0]
+                            cat.append(dense_vis)
+                    # Concatenate images
                     out = utils.make_grid(
-                        np.stack(
-                            [img, sparse_vis, dense_vis],
-                            axis=0,
-                        ),
+                        np.stack(cat, axis=0),
                         rows=1,
-                        cols=3,
+                        cols=len(cat),
                         resize=vis_res,
                     )
-                    time_vis += time.time() - stime_disk
+                    time_vis += time.time() - stime_vis
                     stime_disk = time.time()
                     save_dir = (
                         out_dir
