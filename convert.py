@@ -84,8 +84,8 @@ def seg_img2array(
     # Conversion loop
     for i, seg_img_path in enumerate(seg_img_paths):
         logger.info(f"[{i+1:,}/{len(seg_img_paths):,}] - Converting {seg_img_path}")
-        seg_img, is_valid = utils.load_img(seg_img_path, "RGB")
-        if not is_valid:
+        seg_img = utils.load_img(seg_img_path, "RGB")
+        if seg_img is None:
             logger.warning(
                 f"Empty input segmentation image found: {seg_img_path} (skipping)"
             )
