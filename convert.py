@@ -190,8 +190,8 @@ def depth_img2array(
     # Conversion loop
     for idx, depth_img_path in enumerate(depth_img_paths):
         # Load depth image
-        depth_img, is_valid = utils.load_img(depth_img_path, "RGB")
-        if not is_valid:
+        depth_img = utils.load_img(depth_img_path, "RGB")
+        if depth_img is None:
             logger.warning(
                 f"Empty input depth image found: {depth_img_path} (skipping)"
             )
