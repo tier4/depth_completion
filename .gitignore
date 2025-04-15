@@ -10,6 +10,7 @@
 *.log
 *.csv
 *.bl2
+*.mp4
 
 # Directories
 .vscode/
