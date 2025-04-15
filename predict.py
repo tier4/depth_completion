@@ -236,6 +236,13 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     help="Batch size for inference.",
     show_default=True,
 )
+@click.option(
+    "--postprocess",
+    type=bool,
+    default=False,
+    help="Whether to postprocess the dense depth maps.",
+    show_default=True,
+)
 def main(
     src_root: Path,
     dst_root: Path,
@@ -264,6 +271,7 @@ def main(
     batch_size: int,
     kl_penalty: bool,
     kl_weight: float,
+    postprocess: bool,
 ) -> None:
     # Set log level
     logger.remove()
@@ -360,7 +368,7 @@ def main(
     logger.info(
         f"Initialized inference pipeline "
         f"(dtype={precision}, vae={vae}, model={model}, "
-        f"loss_funcs={loss_funcs}, batch_size={batch_size}, use_seg={use_seg})"
+        f"loss_funcs={loss_funcs}, batch_size={batch_size})"
     )
 
     ############################################################
@@ -446,6 +454,23 @@ def main(
         img_paths = img_paths_all[dataset_dir.name]
         sparse_paths = sparse_paths_all[dataset_dir.name]
         seg_paths = seg_paths_all[dataset_dir.name]
+        has_seg = len(seg_paths) > 0 and use_seg
+        seg_meta: dict[str, Any] | None = None
+        seg_ids: dict[str, int] | None = None
+        if has_seg:
+            seg_meta_path = dataset_dir / utils.DATASET_DIR_NAME_SEG / "map.csv"
+            if not seg_meta_path.exists():
+                logger.error(f"Segmentation mapping file not found at {seg_meta_path}")
+                has_seg = False
+            else:
+                seg_meta = utils.load_csv(
+                    seg_meta_path,
+                    columns={"id": int, "name": str, "r": int, "g": int, "b": int},
+                )
+                seg_ids = {
+                    seg_meta["name"][i]: seg_meta["id"][i]
+                    for i in range(len(seg_meta["name"]))
+                }
         progbar = tqdm.tqdm(
             total=len(img_paths),
             dynamic_ncols=True,
@@ -456,7 +481,6 @@ def main(
             batch_img_paths = img_paths[i : i + batch_size]
             batch_sparse_paths = sparse_paths[i : i + batch_size]
             batch_seg_paths = seg_paths[i : i + batch_size]
-            use_seg = len(batch_seg_paths) > 0
             bs = len(batch_img_paths)
 
             ############################################################
@@ -491,7 +515,7 @@ def main(
             )
 
             # Load segmentation maps if provided
-            if use_seg:
+            if has_seg:
                 batch_seg_paths = [
                     batch_seg_paths[j] for j in range(len(ret)) if ret[j] is not None
                 ]
@@ -503,16 +527,6 @@ def main(
                 )
                 batch_segs = batch_segs
             time_disk = time.time() - stime_disk
-
-            ############################################################
-            # Add guides to sparse depth map
-            ############################################################
-            # Add guides to sparse depth map using segmentation map
-            # TODO: Eliminate for loop over batch dimension
-            if use_seg:
-                # TODO: Implement adding guides to sparse depth map feature
-                pass
-            postfix["time/guides"] = 0.0
 
             ############################################################
             # Run inference
@@ -534,6 +548,19 @@ def main(
                 :, 0
             ]  # [N, H, W]
             postfix["time/infer"] = time.time() - stime_disk
+
+            ############################################################
+            # Postprocess dense depth map
+            ############################################################
+            if postprocess:
+                if has_seg:
+                    assert seg_ids is not None
+                    stime_post = time.time()
+                    if "sky" in seg_ids:
+                        batch_denses[(batch_segs == seg_ids["sky"])] = max_depth
+                    if "ego_vehicle" in seg_ids:
+                        batch_denses[(batch_segs == seg_ids["ego_vehicle"])] = 0.5
+                    postfix["time/post"] = time.time() - stime_post
 
             ############################################################
             # Save results
