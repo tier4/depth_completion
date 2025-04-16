@@ -1,6 +1,5 @@
 import concurrent.futures
 import csv
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +8,11 @@ import click
 import cv2
 import imagesize
 import numpy as np
+import torch
+import torchvision
+from diffusers.pipelines.marigold.marigold_image_processing import (
+    MarigoldImageProcessor,
+)
 
 NPARRAY_EXTS = [".npy", ".npz", ".bl2"]
 
@@ -198,6 +202,119 @@ def load_array(path: Path) -> np.ndarray:
     return np.load(path)
 
 
+def load_tensor(path: Path) -> torch.Tensor:
+    """Load a numpy array from disk and convert it to a PyTorch tensor.
+
+    Args:
+        path (Path): Path to the numpy array file. Supports .npy (uncompressed numpy),
+            .npz (numpy compressed), and .bl2 (blosc2 compressed) formats.
+
+    Returns:
+        torch.Tensor: The loaded array as a PyTorch tensor.
+
+    Example:
+        >>> # Load array as tensor
+        >>> tensor = load_tensor(Path("array.npy"))
+    """
+    array = load_array(path)
+    tensor = torch.from_numpy(array)
+    return tensor
+
+
+def visualize_depth(
+    depth_maps: torch.Tensor,
+    max_depth: float,
+    min_depth: float = 0.0,
+    color_map: str = "Spectral",
+) -> torch.Tensor:
+    """Visualize depth maps by converting them to colored representations.
+
+    This function takes a batch of depth maps and converts them to RGB visualizations
+    using a specified color map. The depth values are normalized to the range [0, 1]
+    based on the provided min and max depth values.
+
+    Args:
+        depth_maps (torch.Tensor): Batch of depth maps with shape [N,1,H,W],
+            where N is the batch size, and H, W are the height and width.
+        max_depth (float): Maximum depth value for normalization.
+        min_depth (float, optional): Minimum depth value for normalization.
+            Defaults to 0.0.
+        color_map (str, optional): Color map to use for visualization.
+            Defaults to "Spectral".
+
+    Returns:
+        torch.Tensor: Batch of visualized depth maps as RGB images with shape [N,3,H,W].
+
+    Raises:
+        ValueError: If min_depth is greater than or equal to max_depth.
+        ValueError: If depth_maps does not have the expected shape [N,1,H,W].
+
+    Example:
+        >>> depth_tensor = torch.randn(4, 1, 480, 640)  # 4 depth maps
+        >>> rgb_tensor = visualize_depth(depth_tensor, 10.0)
+        >>> # rgb_tensor has shape [4, 3, 480, 640]
+    """  # noqa: E501
+    if min_depth >= max_depth:
+        raise ValueError(f"Invalid values range: [{min_depth}, {max_depth}].")
+    if depth_maps.ndim != 4 or depth_maps.shape[1] != 1:
+        raise ValueError(
+            f"Input depth maps must have shape [N,1,H,W], got {depth_maps.shape}"
+        )
+
+    # Normalize depth maps to [0, 1]
+    depth_maps = (depth_maps - min_depth) / (max_depth - min_depth)
+
+    # Visualize each depth map and stack results
+    visualized = torch.stack(
+        [
+            MarigoldImageProcessor.colormap(depth_map[0], cmap=color_map, bytes=True)
+            for depth_map in depth_maps
+        ],
+        dim=0,
+    )
+
+    # Convert from [N,H,W,3] to [N,3,H,W]
+    visualized = visualized.permute(0, 3, 1, 2)
+
+    return visualized
+
+
+def load_tensors(paths: list[Path], num_threads: int = 1) -> list[torch.Tensor]:
+    """Load multiple numpy arrays from file paths in parallel using multithreading.
+
+    Opens multiple numpy array files in parallel, converts them to PyTorch tensors.
+    Returns a list of loaded tensors.
+
+    Args:
+        paths (list[Path]): List of paths to the numpy array files to load.
+            Supports .npy (uncompressed numpy), .npz (numpy compressed),
+            and .bl2 (blosc2 compressed) formats.
+        num_threads (int, optional): Number of worker threads to use.
+            Defaults to 1.
+
+    Returns:
+        list[torch.Tensor]: A list of loaded PyTorch tensors in the same order as the input paths.
+
+    Example:
+        >>> # Load multiple arrays as tensors in parallel
+        >>> array_paths = [Path("array1.npy"), Path("array2.npz"), Path("array3.bl2")]
+        >>> tensors = load_tensors(array_paths, num_threads=8)
+    """  # noqa: E501
+    if num_threads == 1:
+        return [load_tensor(path) for path in paths]
+
+    # Define worker function that calls load_tensor
+    def worker(path: Path) -> torch.Tensor:
+        return load_tensor(path)
+
+    # Use ThreadPoolExecutor for parallel loading with executor.map to preserve order
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        # map preserves the order of the input paths in the results
+        results = list(executor.map(worker, paths))
+
+    return results
+
+
 def load_arrays(paths: list[Path], num_threads: int = 1) -> list[np.ndarray]:
     """Load multiple numpy arrays from file paths in parallel using multithreading.
 
@@ -239,6 +356,91 @@ def load_arrays(paths: list[Path], num_threads: int = 1) -> list[np.ndarray]:
         results = list(executor.map(worker, paths))
 
     return results
+
+
+def save_img(img: torch.Tensor, path: Path) -> None:
+    """Save a PyTorch tensor image to disk as an image file.
+
+    This function handles the conversion of tensor data to image format and saves it to disk.
+    It automatically creates any necessary parent directories and handles different tensor
+    data types appropriately.
+
+    Args:
+        img (torch.Tensor): The image tensor to save with shape [C, H, W].
+            For uint8 tensors, values should be in range [0, 255].
+            For float32 tensors, values should be in range [0.0, 1.0].
+        path (Path): Path where the image should be saved. The file extension
+            determines the output format (e.g., .png, .jpg).
+
+    Returns:
+        None
+
+    Raises:
+        ValueError: If the tensor has an unsupported dtype or if float32 values
+            are outside the valid range [0.0, 1.0].
+
+    Example:
+        >>> # Save an RGB image tensor
+        >>> img_tensor = torch.rand(3, 256, 256)  # [C, H, W] format in range [0, 1]
+        >>> save_img(img_tensor, Path("output.png"))
+        >>>
+        >>> # Save a grayscale image
+        >>> gray_tensor = torch.rand(1, 512, 512)  # Single channel
+        >>> save_img(gray_tensor, Path("grayscale.jpg"))
+    """  # noqa: E501
+    # Ensure the directory exists
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Ensure img is on CPU and convert to appropriate format
+    img = img.detach().cpu()
+
+    if img.dtype == torch.uint8:
+        img = img.float() / 255.0
+    elif img.dtype == torch.float32:
+        if img.max() > 1.0 or img.min() < 0.0:
+            raise ValueError(
+                "Image tensor must be in the range [0, 1] if dtype is float32"
+            )
+    else:
+        raise ValueError(f"Unsupported image type: {img.dtype}")
+
+    # Use torchvision to save the image
+    torchvision.utils.save_image(img, path)
+
+
+def save_tensor(
+    x: torch.Tensor,
+    path: Path,
+    compress: str | None = None,
+) -> None:
+    """Save a PyTorch tensor to disk with optional compression.
+
+    Args:
+        x (torch.Tensor): The PyTorch tensor to save
+        path (Path): Path where the tensor should be saved
+        compress (str | None, optional): The compression format to use.
+            "npz" uses numpy's compressed format, "bl2" uses blosc2 compression,
+            "npy" saves as uncompressed numpy format.
+            If None, saves uncompressed as .npy. Defaults to None.
+
+    Raises:
+        ValueError: If the file extension doesn't match the compression format:
+            - .npy for uncompressed or when compress="npy"
+            - .npz for npz compression
+            - .bl2 for blosc2 compression
+
+    Examples:
+        >>> tensor = torch.rand(100, 100)
+        >>> save_tensor(tensor, Path("tensor.npy"))  # Save uncompressed
+        >>> save_tensor(tensor, Path("tensor.npz"), compress="npz")  # Save with npz compression
+        >>> save_tensor(tensor, Path("tensor.bl2"), compress="bl2")  # Save with blosc2 compression
+        >>> save_tensor(tensor, Path("tensor.npy"), compress="npy")  # Explicitly save as .npy
+    """  # noqa: E501
+    # Convert tensor to numpy array
+    x_np = x.detach().cpu().numpy()
+
+    # Use save_array to handle the actual saving with compression
+    save_array(x_np, path, compress=compress)
 
 
 def save_array(
@@ -287,24 +489,6 @@ def save_array(
         np.save(path, x)
     else:
         np.save(path, x)
-
-
-def infer_camera_category(img_path: Path) -> str | None:
-    """Infer the camera category from an image file path.
-
-    Checks if any of the predefined camera categories (e.g. CAM_FRONT_WIDE, CAM_BACK_LEFT etc.)
-    appear in the filename. Returns the first matching category found.
-
-    Args:
-        img_path (Path): Path to the image file
-
-    Returns:
-        str | None: The inferred camera category if found in the filename, None otherwise
-    """  # noqa: E501
-    for category in CAMERA_CATEGORIES:
-        if category in img_path.name:
-            return category
-    return None
 
 
 def mae(preds: np.ndarray, depth: np.ndarray, mask: np.ndarray | None = None) -> float:
@@ -415,7 +599,50 @@ class CommaSeparated(click.ParamType):
             )
 
 
-def load_img(path: Path, mode: str | None = None) -> np.ndarray | None:
+def load_img_tensor(path: Path, mode: str | None = None) -> torch.Tensor | None:
+    """Load an image from a file path as a PyTorch tensor.
+
+    Opens an image file using OpenCV, optionally converts it to a specific color mode,
+    and returns it as a PyTorch tensor. Returns None if the image is empty or couldn't be loaded.
+
+    Args:
+        path (Path): Path to the image file to load
+        mode (str | None, optional): Color mode to convert image
+            to (e.g. 'RGB', 'BGR', 'L'). If None, automatically determines mode
+            based on image channels (RGB for 3 channels, L for 1 channel).
+            Defaults to None.
+
+    Returns:
+        torch.Tensor | None: The loaded image as a PyTorch tensor with shape [C, H, W],
+            or None if the image is empty or couldn't be loaded.
+
+    Example:
+        >>> # Load RGB image as tensor
+        >>> img = load_img_tensor(Path("image.jpg"), mode="RGB")
+        >>> if img is not None:
+        ...     # Process valid tensor
+        ...     pass
+        >>> # Load BGR image (OpenCV default) as tensor
+        >>> img = load_img_tensor(Path("image.jpg"), mode="BGR")
+        >>> # Load grayscale image as tensor
+        >>> img = load_img_tensor(Path("depth.png"), mode="L")
+        >>> # Auto-detect mode based on channels
+        >>> img = load_img_tensor(Path("image.jpg"))
+    """  # noqa: E501
+    img_array = load_img_array(path, mode)
+    if img_array is None:
+        return None
+
+    # Convert numpy array to PyTorch tensor
+    if img_array.ndim == 2:  # Grayscale image
+        tensor = torch.from_numpy(img_array).unsqueeze(0)  # [1, H, W]
+    else:  # Color image
+        # Move channel dimension from last to first: [H, W, C] -> [C, H, W]
+        tensor = torch.from_numpy(img_array).permute(2, 0, 1)
+    return tensor
+
+
+def load_img_array(path: Path, mode: str | None = None) -> np.ndarray | None:
     """Load an image from a file path.
 
     Opens an image file using OpenCV and optionally converts it to a specific color mode.
@@ -476,7 +703,7 @@ def load_img(path: Path, mode: str | None = None) -> np.ndarray | None:
     return img
 
 
-def load_imgs(
+def load_img_arrays(
     paths: list[Path], mode: str | None = None, num_threads: int = 1
 ) -> list[np.ndarray | None]:
     """Load multiple images from file paths in parallel using multithreading.
@@ -512,11 +739,63 @@ def load_imgs(
 
     # For single-threaded execution, use simple loop instead of ThreadPoolExecutor
     if num_threads == 1:
-        return [load_img(path, mode) for path in paths]
+        return [load_img_array(path, mode) for path in paths]
 
     # Define worker function that calls load_img
     def worker(path: Path) -> np.ndarray | None:
-        return load_img(path, mode)
+        return load_img_array(path, mode)
+
+    # Use ThreadPoolExecutor for parallel loading with executor.map to preserve order
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        # map preserves the order of the input paths in the results
+        results = list(executor.map(worker, paths))
+
+    return results
+
+
+def load_img_tensors(
+    paths: list[Path],
+    mode: str | None = None,
+    num_threads: int = 1,
+) -> list[torch.Tensor | None]:
+    """Load multiple images from file paths as PyTorch tensors in parallel using multithreading.
+
+    Opens multiple image files using OpenCV in parallel, optionally converts them
+    to a specific color mode, and returns them as PyTorch tensors. Returns a list of
+    loaded images as tensors or None for images that couldn't be loaded.
+
+    Args:
+        paths (list[Path]): List of paths to the image files to load
+        mode (str | None, optional): Color mode to convert images
+            to (e.g. 'RGB', 'BGR', 'L'). If None, automatically determines mode
+            based on image channels (RGB for 3 channels, L for 1 channel).
+            Defaults to None.
+        num_threads (int, optional): Number of worker threads to use.
+            Defaults to 1.
+
+    Returns:
+        list[torch.Tensor | None]: A list of loaded images as PyTorch tensors with shape [C, H, W],
+            or None for images that couldn't be loaded.
+
+    Example:
+        >>> # Load multiple RGB images as tensors in parallel
+        >>> image_paths = [Path("image1.jpg"), Path("image2.jpg"), Path("image3.jpg")]
+        >>> results = load_img_tensors(image_paths, mode="RGB", num_threads=8)
+        >>> for tensor in results:
+        ...     if tensor is not None:
+        ...         # Process valid tensor
+        ...         pass
+    """  # noqa: E501
+    if not paths:
+        return []
+
+    # For single-threaded execution, use simple loop instead of ThreadPoolExecutor
+    if num_threads == 1:
+        return [load_img_tensor(path, mode) for path in paths]
+
+    # Define worker function that calls load_img_tensor
+    def worker(path: Path) -> torch.Tensor | None:
+        return load_img_tensor(path, mode)
 
     # Use ThreadPoolExecutor for parallel loading with executor.map to preserve order
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
@@ -527,60 +806,114 @@ def load_imgs(
 
 
 def make_grid(
-    imgs: np.ndarray,
-    rows: int,
-    cols: int,
+    imgs: torch.Tensor | list[torch.Tensor],
+    nrow: int | None = None,
     resize: tuple[int, int] | None = None,
-    interpolation: int = cv2.INTER_LINEAR,
-) -> np.ndarray:
-    """Create a grid of images from a numpy array.
+    interpolation: str = "bilinear",
+    antialias: bool = False,
+) -> torch.Tensor:
+    """Create a grid of images using torchvision.utils.make_grid.
 
     Args:
-        imgs (np.ndarray): Array of images with shape (N,H,W,C)
-        rows (int): Number of rows in output grid
-        cols (int): Number of columns in output grid
+        imgs (torch.Tensor | list[torch.Tensor]): Tensor of images with shape (N,C,H,W)
+            or list of tensors with shape (C,H,W)
+        nrow (int | None): Number of images in each row of the grid. If None, all images
+            will be placed in a single row. Defaults to None.
         resize (tuple[int, int] | None): Target (height, width) to resize final grid to.
             If None: No resizing is performed
             If either dimension is -1: That dimension is calculated to preserve aspect ratio
-        interpolation (int): OpenCV interpolation method for resizing
+        interpolation (str): Interpolation mode for resizing. Valid values are:
+            "nearest", "bilinear", "bicubic", "lanczos". Defaults to "bilinear".
+        antialias (bool): Whether to use antialiasing when resizing. This can improve
+            quality but may be slower. Defaults to False.
 
     Returns:
-        np.ndarray: Grid image with shape (grid_height, grid_width, C)
-    """
-    if imgs.size == 0 or len(imgs.shape) != 4:
-        raise ValueError("Images must be non-empty 4D array (N,H,W,C)")
+        torch.Tensor: Grid image with shape (C, grid_height, grid_width)
 
-    n = imgs.shape[0]
-    h, w = imgs.shape[1:3]
+    Raises:
+        ValueError: If an empty list of images is provided, if images have incorrect shape,
+            or if an unsupported interpolation mode is specified.
 
-    # Create grid
-    grid = np.zeros((h * rows, w * cols) + imgs.shape[3:], dtype=imgs.dtype)
-    for idx in range(min(n, rows * cols)):
-        i, j = idx // cols, idx % cols
-        grid[i * h : (i + 1) * h, j * w : (j + 1) * w] = imgs[idx]
+    Example:
+        >>> # Create a grid from a batch of images
+        >>> batch = torch.rand(8, 3, 64, 64)  # 8 RGB images
+        >>> grid = make_grid(batch, nrow=4)  # 2x4 grid
+        >>>
+        >>> # Create a grid from individual images and resize
+        >>> images = [torch.rand(3, 64, 64) for _ in range(5)]
+        >>> grid = make_grid(images, resize=(256, -1))  # Resize height to 256, width auto
+    """  # noqa: E501
 
-    # Resize the grid after creation
+    # Convert list of tensors to a single tensor if needed
+    if isinstance(imgs, list):
+        if not imgs:
+            raise ValueError("Empty list of images provided")
+        # Check if all tensors have shape (C,H,W)
+        for img in imgs:
+            if not isinstance(img, torch.Tensor) or img.dim() != 3:
+                raise ValueError("Each image in the list must be a 3D tensor (C,H,W)")
+        # Stack tensors to create a batch
+        imgs = torch.stack(imgs)
+
+    if imgs.dim() != 4:
+        raise ValueError("Images must be 4D tensor (N,C,H,W)")
+
+    # Create grid using torchvision
+    if nrow is None:
+        nrow = len(imgs)
+    grid = torchvision.utils.make_grid(imgs, nrow=nrow)
+
+    # Resize if needed
     if resize is not None:
         th, tw = resize
         if th != -1 or tw != -1:
+            # Get current dimensions
+            _, h, w = grid.shape
+
             # Preserve aspect ratio if either dimension is -1
-            target_h = th if th != -1 else int(tw * grid.shape[0] / grid.shape[1])
-            target_w = tw if tw != -1 else int(th * grid.shape[1] / grid.shape[0])
-            grid = cv2.resize(grid, (target_w, target_h), interpolation=interpolation)
+            target_h = th if th != -1 else int(tw * h / w)
+            target_w = tw if tw != -1 else int(th * w / h)
+
+            # Get interpolation mode (only accept lowercase)
+            interpolation = interpolation.lower()
+            if interpolation == "nearest":
+                mode = torchvision.transforms.InterpolationMode.NEAREST
+            elif interpolation == "bilinear":
+                mode = torchvision.transforms.InterpolationMode.BILINEAR
+            elif interpolation == "bicubic":
+                mode = torchvision.transforms.InterpolationMode.BICUBIC
+            elif interpolation == "lanczos":
+                mode = torchvision.transforms.InterpolationMode.LANCZOS
+            else:
+                raise ValueError(
+                    f"Unsupported interpolation mode: {interpolation}. "
+                    "Supported modes are: 'nearest', 'bilinear', 'bicubic', 'lanczos'."
+                )
+
+            # Resize directly without creating a transform object
+            grid = torchvision.transforms.functional.resize(
+                grid.unsqueeze(0),
+                (target_h, target_w),
+                interpolation=mode,
+                antialias=antialias,
+            ).squeeze(0)
 
     return grid
 
 
-def has_nan(x: np.ndarray) -> bool:
-    """Check if a numpy array contains any NaN values.
+def has_nan(x: np.ndarray | torch.Tensor) -> bool:
+    """Check if an array contains any NaN values.
 
     Args:
-        x (np.ndarray): Input array to check
+        x (np.ndarray | torch.Tensor): Input array to check
 
     Returns:
         bool: True if array contains NaN values, False otherwise
     """  # noqa: E501
-    return np.isnan(x).any()
+    if isinstance(x, torch.Tensor):
+        return bool(torch.isnan(x).any().item())
+    else:
+        return np.isnan(x).any()
 
 
 def to_depth_map(

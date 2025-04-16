@@ -84,7 +84,7 @@ def seg_img2array(
     # Conversion loop
     for i, seg_img_path in enumerate(seg_img_paths):
         logger.info(f"[{i+1:,}/{len(seg_img_paths):,}] - Converting {seg_img_path}")
-        seg_img = utils.load_img(seg_img_path, "RGB")
+        seg_img = utils.load_img_array(seg_img_path, "RGB")
         if seg_img is None:
             logger.warning(
                 f"Empty input segmentation image found: {seg_img_path} (skipping)"
@@ -190,7 +190,7 @@ def depth_img2array(
     # Conversion loop
     for idx, depth_img_path in enumerate(depth_img_paths):
         # Load depth image
-        depth_img = utils.load_img(depth_img_path, "RGB")
+        depth_img = utils.load_img_array(depth_img_path, "RGB")
         if depth_img is None:
             logger.warning(
                 f"Empty input depth image found: {depth_img_path} (skipping)"
