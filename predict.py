@@ -156,13 +156,6 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "--use-seg",
-    type=bool,
-    default=False,
-    help="Whether to use segmentation maps for depth completion.",
-    show_default=False,
-)
-@click.option(
     "--use-compile",
     type=bool,
     default=True,
@@ -194,15 +187,15 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 )
 @click.option(
     "--opt",
-    type=click.Choice(["adam", "adamw", "sgd"]),
-    default="adam",
+    type=click.Choice(["adam", "sgd"]),
+    default="sgd",
     help="Optimizer to use for depth completion.",
     show_default=True,
 )
 @click.option(
     "--lr-latent",
     type=click.FloatRange(min=0, min_open=True),
-    default=0.05,
+    default=0.1,
     help="Learning rate for latent variable.",
     show_default=True,
 )
@@ -216,7 +209,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 @click.option(
     "--kl-penalty",
     type=bool,
-    default=False,
+    default=True,
     help="Whether to apply KL divergence penalty to keep "
     "the distribution of prediction latents close to N(0,1).",
     show_default=True,
@@ -236,13 +229,6 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     help="Batch size for inference.",
     show_default=True,
 )
-@click.option(
-    "--postprocess",
-    type=bool,
-    default=False,
-    help="Whether to postprocess the dense depth maps.",
-    show_default=True,
-)
 def main(
     src_root: Path,
     dst_root: Path,
@@ -256,7 +242,6 @@ def main(
     vis_res: tuple[int, int],
     vis_range: str,
     vis_order: list[str],
-    use_seg: bool,
     log: Path | None,
     log_level: str,
     precision: str,
@@ -271,7 +256,6 @@ def main(
     batch_size: int,
     kl_penalty: bool,
     kl_weight: float,
-    postprocess: bool,
 ) -> None:
     # Set log level
     logger.remove()
@@ -388,7 +372,7 @@ def main(
     for dataset_dir in dataset_dirs:
         # Load segmentation meta file (if provided)
         seg_dir = dataset_dir / utils.DATASET_DIR_NAME_SEG
-        has_seg_dir = use_seg and seg_dir.exists()
+        has_seg_dir = seg_dir.exists()
 
         # Find paths of input images
         img_dir = dataset_dir / utils.DATASET_DIR_NAME_IMAGE
@@ -454,7 +438,7 @@ def main(
         img_paths = img_paths_all[dataset_dir.name]
         sparse_paths = sparse_paths_all[dataset_dir.name]
         seg_paths = seg_paths_all[dataset_dir.name]
-        has_seg = len(seg_paths) > 0 and use_seg
+        has_seg = len(seg_paths) > 0
         seg_meta: dict[str, Any] | None = None
         seg_ids: dict[str, int] | None = None
         if has_seg:
@@ -548,19 +532,6 @@ def main(
                 :, 0
             ]  # [N, H, W]
             postfix["time/infer"] = time.time() - stime_disk
-
-            ############################################################
-            # Postprocess dense depth map
-            ############################################################
-            if postprocess:
-                if has_seg:
-                    assert seg_ids is not None
-                    stime_post = time.time()
-                    if "sky" in seg_ids:
-                        batch_denses[(batch_segs == seg_ids["sky"])] = max_depth
-                    if "ego_vehicle" in seg_ids:
-                        batch_denses[(batch_segs == seg_ids["ego_vehicle"])] = 0.5
-                    postfix["time/post"] = time.time() - stime_post
 
             ############################################################
             # Save results

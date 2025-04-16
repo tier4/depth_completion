@@ -254,7 +254,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 optimization. Options include "l1", "l2", "edge", and "smooth".
                 Defaults to ["l1", "l2"].
             opt (str, optional): Optimizer to use for depth completion.
-                Options are "adam", "adamw", or "sgd". Defaults to "adam".
+                Options are "adam" or "sgd". Defaults to "adam".
             lr (tuple[float, float], optional): Learning rates for (latent, scaling).
                 Defaults to (0.05, 0.005).
             beta (float, optional): Momentum factor for prediction latents between
@@ -413,8 +413,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             ]
             if opt == "adam":
                 optimizer = torch.optim.Adam(param_groups)
-            elif opt == "adamw":
-                optimizer = torch.optim.AdamW(param_groups)
             elif opt == "sgd":
                 optimizer = torch.optim.SGD(param_groups)
             else:
