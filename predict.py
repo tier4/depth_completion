@@ -209,6 +209,22 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     help="Batch size for inference.",
     show_default=True,
 )
+@click.option(
+    "--use-prev-latent",
+    type=bool,
+    default=False,
+    help="Whether to use previous latent variables as a prior.",
+    show_default=True,
+)
+@click.option(
+    "--beta",
+    type=click.FloatRange(min=0, min_open=True),
+    default=0.9,
+    help="Weight for the latent consistency term. "
+    "Higher values give more weight to new latents, "
+    "while lower values preserve more information from previous frames.",
+    show_default=True,
+)
 def main(
     src_root: Path,
     dst_root: Path,
@@ -231,6 +247,8 @@ def main(
     opt: str,
     lr_latent: float,
     lr_scaling: float,
+    use_prev_latent: bool,
+    beta: float,
     batch_size: int,
     kl_penalty: bool,
     kl_weight: float,
@@ -272,6 +290,15 @@ def main(
         else:
             loss_funcs_.append(loss_func)
     loss_funcs = loss_funcs_
+
+    # NOTE:
+    # Force batch_size =1 when use_prev_latent=True
+    if use_prev_latent and batch_size > 1:
+        logger.warning(
+            "Currently, batch_size is forced to 1 when use_prev_latent=True. "
+            "This will be fixed in the future"
+        )
+        batch_size = 1
 
     ############################################################
     # Model initialization
@@ -414,6 +441,7 @@ def main(
             desc=f"{dataset_idx + 1}/{len(dataset_dirs)} - {dataset_dir.name}",
         )
         postfix: dict[str, Any] = {}
+        batch_pred_latents_prev: torch.Tensor | None = None
         for i in range(0, len(img_paths), batch_size):
             batch_img_paths = img_paths[i : i + batch_size]
             batch_sparse_paths = sparse_paths[i : i + batch_size]
@@ -485,14 +513,10 @@ def main(
             # Run inference
             ############################################################
             stime_infer = time.time()
-            batch_denses: torch.Tensor
-            batch_pred_latents: torch.Tensor
-            (
-                batch_denses,
-                batch_pred_latents,
-            ) = pipe(
+            batch_denses, batch_pred_latents = pipe(
                 batch_imgs,
                 batch_sparses,
+                pred_latents_prev=batch_pred_latents_prev,
                 max_depth=max_depth,
                 steps=steps,
                 resolution=res,
@@ -502,7 +526,13 @@ def main(
                 lr=(lr_latent, lr_scaling),
                 kl_penalty=kl_penalty,
                 kl_weight=kl_weight,
+                beta=beta,
             )
+            assert isinstance(batch_denses, torch.Tensor)
+            assert isinstance(batch_pred_latents, torch.Tensor)
+            if use_prev_latent:
+                # Set as previous latent variables
+                batch_pred_latents_prev = batch_pred_latents
             postfix["time/infer"] = time.time() - stime_infer
 
             ############################################################
