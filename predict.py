@@ -225,6 +225,13 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     "while lower values preserve more information from previous frames.",
     show_default=True,
 )
+@click.option(
+    "--use-seg",
+    type=bool,
+    default=False,
+    help="Whether to use segmentation maps for depth completion.",
+    show_default=True,
+)
 def main(
     src_root: Path,
     dst_root: Path,
@@ -252,6 +259,7 @@ def main(
     batch_size: int,
     kl_penalty: bool,
     kl_weight: float,
+    use_seg: bool,
 ) -> None:
     # Set log level
     logger.remove()
@@ -365,7 +373,7 @@ def main(
     sparse_paths_all: dict[str, list[Path]] = {}
     seg_paths_all: dict[str, list[Path]] = {}
     for dataset_dir in dataset_dirs:
-        # Load segmentation meta file (if provided)
+        # Check if segmentation directory exists
         seg_dir = dataset_dir / utils.DATASET_DIR_NAME_SEG
         has_seg_dir = seg_dir.exists()
 
@@ -388,7 +396,7 @@ def main(
             if sparse_path is None:
                 logger.warning(f"No sparse depth map found for image {path} (skipped)")
                 continue
-            if has_seg_dir:
+            if use_seg and has_seg_dir:
                 seg_path = utils.find_file_with_exts(
                     (seg_dir / path.relative_to(img_dir)).with_suffix(".npy"),
                     utils.NPARRAY_EXTS,
@@ -405,16 +413,6 @@ def main(
             logger.critical("No valid input pairs found")
             sys.exit(1)
         img_paths = img_paths_
-        if len(img_paths) != len(sparse_paths):
-            logger.critical("Number of images and sparse depth maps do not match")
-            sys.exit(1)
-        if has_seg_dir:
-            if len(img_paths) != len(seg_paths):
-                logger.critical(
-                    "Number of images (or sparse depth maps) and "
-                    "segmentation maps do not match"
-                )
-                sys.exit(1)
         seg_paths_all[dataset_dir.name] = seg_paths
         img_paths_all[dataset_dir.name] = img_paths
         sparse_paths_all[dataset_dir.name] = sparse_paths
@@ -493,7 +491,7 @@ def main(
             )  # [N, 1, H, W]
 
             # Load segmentation maps if provided
-            if has_seg:
+            if use_seg and has_seg:
                 batch_seg_paths = [
                     batch_seg_paths[j] for j in range(len(ret)) if ret[j] is not None
                 ]
