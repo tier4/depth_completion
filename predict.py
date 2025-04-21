@@ -374,27 +374,26 @@ def main(
     segmask_paths_all: dict[str, list[Path]] = {}
     segmaps: dict[str, dict[str, Any]] = {}
     for dataset_dir in dataset_dirs:
-        # Check if segmentation directory exists
-        segmask_dir = dataset_dir / utils.DATASET_DIR_NAME_SEGMASK
-        has_segmask_dir = segmask_dir.exists()
 
         # Load segmentation mapping file
-        if use_segmask:
-            if has_segmask_dir:
-                segmap_path = segmask_dir / "map.csv"
-                if not segmap_path.exists():
-                    logger.error(f"No segmentation mapping file found at {segmap_path}")
-                    logger.error(
-                        f"Segmentation masks will not be used for {dataset_dir.name}"
-                    )
-                    has_segmask_dir = False
-                else:
-                    segmaps[dataset_dir.name] = utils.load_segmap(segmap_path)
-            else:
+        is_segmask_enabled = use_segmask
+        segmask_dir = dataset_dir / utils.DATASET_DIR_NAME_SEGMASK
+        if not segmask_dir.exists():
+            logger.error(
+                f"No segmentation directory found at {segmask_dir}. "
+                f"Segmentation masks will not used for {dataset_dir.name}"
+            )
+            is_segmask_enabled = False
+        else:
+            segmap_path = segmask_dir / "map.csv"
+            if not segmap_path.exists():
                 logger.error(
-                    f"No segmentation directory found at {segmask_dir}. "
+                    f"No segmentation mapping file found at {segmap_path}. "
                     f"Segmentation masks will not be used for {dataset_dir.name}"
                 )
+                is_segmask_enabled = False
+            else:
+                segmaps[dataset_dir.name] = utils.load_segmap(segmap_path)
 
         # Find paths of input images
         img_dir = dataset_dir / utils.DATASET_DIR_NAME_IMAGE
@@ -404,34 +403,29 @@ def main(
         # Find paths of input sparse depth maps and paired images
         # and optionally segmentation masks
         sparse_dir = dataset_dir / utils.DATASET_DIR_NAME_SPARSE
-        sparse_paths: list[Path] = []
-        img_paths_: list[Path] = []
-        segmask_paths: list[Path] = []
+        sparse_paths_all[dataset_dir.name] = []
+        segmask_paths_all[dataset_dir.name] = []
+        img_paths_all[dataset_dir.name] = []
         for path in img_paths:
             sparse_path = sparse_dir / path.relative_to(img_dir).with_suffix(".png")
             if not sparse_path.exists():
                 logger.warning(f"No sparse depth map found for image {path} (skipped)")
                 continue
-            if use_segmask and has_segmask_dir:
-                segmask_path = segmask_dir / path.relative_to(img_dir).with_suffix(
-                    ".png"
-                )
+            segmask_path = segmask_dir / path.relative_to(img_dir).with_suffix(".png")
+            if is_segmask_enabled:
                 if not segmask_path.exists():
                     logger.warning(
                         f"No segmentation mask found for image {path} (skipped)"
                     )
                     continue
-                segmask_paths.append(segmask_path)
-            sparse_paths.append(sparse_path)
-            img_paths_.append(path)
-        if len(img_paths_) == 0:
+            segmask_paths_all[dataset_dir.name].append(segmask_path)
+            sparse_paths_all[dataset_dir.name].append(sparse_path)
+            img_paths_all[dataset_dir.name].append(path)
+        n = len(img_paths_all[dataset_dir.name])
+        if n == 0:
             logger.critical("No valid input pairs found")
             sys.exit(1)
-        img_paths = img_paths_
-        segmask_paths_all[dataset_dir.name] = segmask_paths
-        img_paths_all[dataset_dir.name] = img_paths
-        sparse_paths_all[dataset_dir.name] = sparse_paths
-        logger.info(f"Found {len(img_paths):,} input pairs for {dataset_dir.name}")
+        logger.info(f"Found {n:,} input pairs for {dataset_dir.name}")
 
     # Create output directory if it doesn't exist
     if not dst_root.exists():
@@ -447,9 +441,7 @@ def main(
         img_paths = img_paths_all[dataset_dir.name]
         sparse_paths = sparse_paths_all[dataset_dir.name]
         segmask_paths = segmask_paths_all[dataset_dir.name]
-        has_segmask = (
-            len(segmask_paths) == len(img_paths) and dataset_dir.name in segmaps
-        )
+        is_segmask_enabled = len(segmask_paths) > 0
         progbar = tqdm.tqdm(
             total=len(img_paths),
             dynamic_ncols=True,
@@ -461,14 +453,15 @@ def main(
             batch_img_paths = img_paths[i : i + batch_size]
             batch_sparse_paths = sparse_paths[i : i + batch_size]
             batch_segmask_paths = segmask_paths[i : i + batch_size]
-            bs = len(batch_img_paths)
+            progbar_n = len(batch_img_paths)
 
             ############################################################
             # Data loading
             ############################################################
-            # Load images
             time_io = 0.0
             stime_io = time.time()
+
+            # Load images
             imgs_list = utils.load_img_tensors(
                 batch_img_paths,
                 mode="RGB",
@@ -483,8 +476,8 @@ def main(
             )
 
             # Load segmentation masks if provided
-            segmasks_list: list[torch.Tensor | None] = [None] * len(imgs_list)
-            if use_segmask and has_segmask:
+            segmasks_list: list[torch.Tensor | None] = []
+            if is_segmask_enabled:
                 segmasks_list = utils.load_img_tensors(
                     batch_segmask_paths,
                     mode="RGB",
@@ -492,39 +485,34 @@ def main(
                 )
 
             # Get flags indicating successful loading
-            ok: list[bool] = []
-            for img, sparse, segmask in zip(
-                imgs_list, sparses_list, segmasks_list, strict=True
-            ):
-                flag = img is not None and sparse is not None
-                if use_segmask and has_segmask:
-                    flag = flag and segmask is not None
-                ok.append(flag)
-            if not any(ok):
-                logger.error("All images in batch failed to load (skipped)")
-                progbar.update(bs)
+            flags: list[bool] = []
+            for j in range(len(imgs_list)):
+                ok = imgs_list[j] is not None and sparses_list[j] is not None
+                if is_segmask_enabled:
+                    ok = ok and segmasks_list[j] is not None
+                flags.append(ok)
+            if not any(flags):
+                logger.error(f"All images in batch {i+1} failed to load (skipped)")
+                progbar.update(progbar_n)
                 continue
 
             # Filter out input pairs missing any of the required data
-            batch_img_paths = utils.filterout(batch_img_paths, ok)
-            batch_sparse_paths = utils.filterout(batch_sparse_paths, ok)
-            imgs_list = utils.filterout(imgs_list, ok)
-            sparses_list = utils.filterout(sparses_list, ok)
-            if use_segmask and has_segmask:
-                batch_segmask_paths = utils.filterout(batch_segmask_paths, ok)
-                segmasks_list = utils.filterout(segmasks_list, ok)
+            batch_img_paths = utils.filterout(batch_img_paths, flags)
+            batch_sparse_paths = utils.filterout(batch_sparse_paths, flags)
+            imgs_list = utils.filterout(imgs_list, flags)
+            sparses_list = utils.filterout(sparses_list, flags)
+            if is_segmask_enabled:
+                batch_segmask_paths = utils.filterout(batch_segmask_paths, flags)
+                segmasks_list = utils.filterout(segmasks_list, flags)
 
             # Create batch tensors and transfer to GPU
             batch_imgs = torch.stack(imgs_list).cuda(non_blocking=True)
             batch_sparses = torch.stack(sparses_list).cuda(non_blocking=True)
             batch_sparses = utils.to_depth(batch_sparses, max_distance=max_depth)
-            if use_segmask and has_segmask:
+            if is_segmask_enabled:
                 segmap = segmaps[dataset_dir.name]
-                # TODO: Implement rest of codes later
                 batch_segmasks = torch.stack(segmasks_list).cuda(non_blocking=True)  # type: ignore
                 batch_segmasks = utils.to_segmask(batch_segmasks, segmap["color"])
-            else:
-                batch_segmasks = None
             time_io += time.time() - stime_io
 
             ############################################################
@@ -625,7 +613,7 @@ def main(
             postfix["time/io"] = time_io
             postfix["time/vis"] = time_vis
             progbar.set_postfix(postfix)
-            progbar.update(bs)
+            progbar.update(progbar_n)
         progbar.close()
         logger.success(f"Finished processing {dataset_dir.name}")
     logger.success(f"Finished processing all {len(dataset_dirs):,} datasets")

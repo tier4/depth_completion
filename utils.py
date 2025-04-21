@@ -415,34 +415,42 @@ def load_arrays(paths: list[Path], num_threads: int = 1) -> list[np.ndarray]:
 
 
 def save_img_tensor(img: torch.Tensor, path: Path) -> None:
-    """Save a PyTorch tensor image to disk as an image file.
+    """Saves a PyTorch image tensor to disk as an image file.
 
-    This function handles the conversion of tensor data to image format and saves it to disk.
-    It automatically creates any necessary parent directories and handles different tensor
-    data types appropriately.
+    This function handles the conversion of tensor data to a standard image format
+    (using torchvision) and saves it to the specified path. It automatically
+    creates parent directories if they don't exist.
+
+    The input tensor should have the shape [C, H, W], where C is the number of
+    channels (e.g., 1 for grayscale, 3 for RGB).
 
     Args:
-        img (torch.Tensor): The image tensor to save with shape [C, H, W].
-            For uint8 tensors, values should be in range [0, 255].
-            For float32 tensors, values should be in range [0.0, 1.0].
-        path (Path): Path where the image should be saved. The file extension
-            determines the output format (e.g., .png, .jpg).
+        img (torch.Tensor): The image tensor to save. Must have shape [C, H, W].
+            - If dtype is `torch.uint8`, values must be in the range [0, 255].
+            - If dtype is `torch.float32`, values must be in the range [0.0, 1.0].
+            The function converts `uint8` tensors to `float32` in [0, 1] before saving.
+        path (Path): The full path (including filename and extension) where the
+            image should be saved. The file extension (e.g., '.png', '.jpg')
+            determines the output format, handled by `torchvision.utils.save_image`.
 
     Returns:
         None
 
     Raises:
-        ValueError: If the tensor has an unsupported dtype or if float32 values
-            are outside the valid range [0.0, 1.0].
+        ValueError: If the input tensor `img` has an unsupported dtype (not
+            `uint8` or `float32`), or if a `float32` tensor has values
+            outside the expected range [0.0, 1.0].
 
     Example:
-        >>> # Save an RGB image tensor
-        >>> img_tensor = torch.rand(3, 256, 256)  # [C, H, W] format in range [0, 1]
-        >>> save_img(img_tensor, Path("output.png"))
+        >>> # Create dummy tensors
+        >>> rgb_tensor = torch.rand(3, 64, 64)  # Float32, [0, 1]
+        >>> gray_tensor_uint8 = (torch.rand(1, 32, 32) * 255).to(torch.uint8) # Uint8, [0, 255]
         >>>
-        >>> # Save a grayscale image
-        >>> gray_tensor = torch.rand(1, 512, 512)  # Single channel
-        >>> save_img(gray_tensor, Path("grayscale.jpg"))
+        >>> # Save an RGB image tensor as PNG
+        >>> save_img_tensor(rgb_tensor, Path("output_rgb.png"))
+        >>>
+        >>> # Save a grayscale uint8 image tensor as JPG
+        >>> save_img_tensor(gray_tensor_uint8, Path("output_gray.jpg"))
     """  # noqa: E501
     # Ensure the directory exists
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -451,6 +459,7 @@ def save_img_tensor(img: torch.Tensor, path: Path) -> None:
     img = img.detach().cpu()
 
     if img.dtype == torch.uint8:
+        # Convert uint8 to float32 in range [0, 1]
         img = img.float() / 255.0
     elif img.dtype == torch.float32:
         if img.max() > 1.0 or img.min() < 0.0:
