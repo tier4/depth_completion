@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 import click
 import numpy as np
+import torch
 import tqdm
 from loguru import logger
 
@@ -71,8 +72,23 @@ Metric = Literal["mae", "rmse"]
     "-bs",
     "--batch-size",
     type=click.IntRange(min=1),
-    default=4,
+    default=32,
     help="Batch size for loading sparse & dense depth maps.",
+    show_default=True,
+)
+@click.option(
+    "-nt",
+    "--num-threads",
+    type=click.IntRange(min=1),
+    default=16,
+    help="Number of threads for loading sparse & dense depth maps.",
+    show_default=True,
+)
+@click.option(
+    "--cuda",
+    type=bool,
+    default=True,
+    help="Whether to use CUDA for faster processing.",
     show_default=True,
 )
 def main(
@@ -87,6 +103,8 @@ def main(
     bin_size: float,
     max_depth: float,
     batch_size: int,
+    num_threads: int,
+    cuda: bool,
 ) -> None:
     # Set log level
     logger.remove()
@@ -98,6 +116,11 @@ def main(
             log.parent.mkdir(parents=True)
         logger.add(log, rotation="100 MB", level=log_level)
         logger.info(f"Saving logs to {log}")
+
+    # Check cuda availability
+    if cuda and not torch.cuda.is_available():
+        logger.warning("CUDA is not available. Using CPU instead.")
+        cuda = False
 
     # Check metrics
     metrics_: list[Metric] = []
@@ -116,6 +139,7 @@ def main(
     if len(dataset_dirs) == 0:
         logger.critical("No dataset directories found")
         sys.exit(1)
+    logger.info(f"Found {len(dataset_dirs):,} datasets")
 
     # Evaluation
     bin_ranges = utils.calc_bins(0, max_depth, bin_size)
@@ -139,7 +163,7 @@ def main(
         dense_paths: list[Path] = []
         cache: set[str] = set()
         for path in sparse_dir.rglob("*"):
-            if not utils.is_array_path(path):
+            if path.suffix != ".png":
                 continue
             stem = path.stem
             if stem in cache:
@@ -155,14 +179,7 @@ def main(
                 continue
             sparse_paths.append(sparse_path)
             dense_paths.append(dense_path)
-        if len(sparse_paths) != len(dense_paths):
-            logger.critical(
-                f"Number of sparse and dense depth maps "
-                f"mismatch: {len(sparse_paths)} != {len(dense_paths)}"
-                f" for {dataset_dir.name}"
-            )
-            sys.exit(1)
-        elif len(sparse_paths) == 0:
+        if len(sparse_paths) == 0:
             logger.warning(
                 f"No dense & sparse depth map pairs found for {dataset_dir.name}. "
                 "Skip this dataset"
@@ -183,14 +200,22 @@ def main(
         for i in range(0, len(sparse_paths), batch_size):
             batch_sparse_paths = sparse_paths[i : i + batch_size]
             batch_dense_paths = dense_paths[i : i + batch_size]
-            batch_sparses = np.stack(
-                utils.load_arrays(batch_sparse_paths),
-                axis=0,
+
+            # Load sparse depth maps
+            batch_sparses = utils.to_depth(
+                torch.stack(
+                    utils.load_img_tensors(
+                        batch_sparse_paths, mode="RGB", num_threads=num_threads
+                    )  # type: ignore
+                ),
+                max_distance=max_depth,
             )
-            batch_denses = np.stack(
-                utils.load_arrays(batch_dense_paths),
-                axis=0,
+            batch_denses = torch.stack(
+                utils.load_tensors(batch_dense_paths, num_threads=num_threads),
             )
+            if cuda:
+                batch_sparses = batch_sparses.cuda(non_blocking=True)
+                batch_denses = batch_denses.cuda(non_blocking=True)
 
             # Compute overall metrics
             for metric in metrics:
@@ -227,20 +252,26 @@ def main(
             for i in range(0, len(sparse_paths), batch_size):
                 batch_sparse_paths = sparse_paths[i : i + batch_size]
                 batch_dense_paths = dense_paths[i : i + batch_size]
-                batch_sparses = np.stack(
-                    utils.load_arrays(batch_sparse_paths),
-                    axis=0,
+                batch_sparses = utils.to_depth(
+                    torch.stack(
+                        utils.load_img_tensors(
+                            batch_sparse_paths, mode="RGB", num_threads=num_threads
+                        )  # type: ignore
+                    ),
+                    max_distance=max_depth,
                 )
-                batch_denses = np.stack(
-                    utils.load_arrays(batch_dense_paths),
-                    axis=0,
+                batch_denses = torch.stack(
+                    utils.load_tensors(batch_dense_paths, num_threads=num_threads),
                 )
+                if cuda:
+                    batch_sparses = batch_sparses.cuda(non_blocking=True)
+                    batch_denses = batch_denses.cuda(non_blocking=True)
 
                 # Compute bin-wise metrics
                 for bin_idx, bin_range in enumerate(bin_ranges):
                     lower, upper = bin_range
                     mask = (batch_sparses > lower) & (batch_sparses <= upper)
-                    if not np.any(mask):
+                    if not torch.any(mask):
                         continue
                     for metric in metrics:
                         if metric == "mae":
