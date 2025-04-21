@@ -549,7 +549,7 @@ def save_array(
     if compress == "npz":
         np.savez_compressed(path, x)
     elif compress == "bl2":
-        blosc2.save_array(x, str(path), mode="w")
+        blosc2.save_array(x, str(path), mode="w")  # type: ignore
     elif compress == "npy":
         np.save(path, x)
     else:
