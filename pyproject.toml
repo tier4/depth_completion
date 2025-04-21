@@ -34,13 +34,6 @@ ignore = [
 [tool.ruff.lint.flake8-unused-arguments]
 ignore-variadic-names = true
 
-[tool.mypy]
-python_version = "3.11.9"
-platform = "linux"
-disallow_untyped_defs = true
-ignore_missing_imports = true
-allow_redefinition = true
-
 [tool.pyright]
 exclude = [
     "data",
@@ -51,5 +44,5 @@ exclude = [
     "**/__pycache__",
     "**/site-packages",
 ]
-typeCheckingMode = "off"
+typeCheckingMode = "standard"
 reportPrivateImportUsage = "none"

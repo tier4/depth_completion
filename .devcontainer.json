@@ -67,7 +67,6 @@
       },
       "extensions": [
         "ms-python.python",
-        "ms-python.mypy-type-checker",
         "ms-python.black-formatter",
         "charliermarsh.ruff",
         "donjayamanne.githistory",

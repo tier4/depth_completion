@@ -1,7 +1,7 @@
 import concurrent.futures
 import csv
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import blosc2
 import click
@@ -10,12 +10,12 @@ import imagesize
 import numpy as np
 import torch
 import torchvision
+import torchvision.transforms.v2.functional as TF
 from diffusers.pipelines.marigold.marigold_image_processing import (
     MarigoldImageProcessor,
 )
 
 NPARRAY_EXTS = [".npy", ".npz", ".bl2"]
-IMAGE_EXTS = [".jpg", ".png"]
 
 DATASET_DIR_NAME_SPARSE = "sparse"
 DATASET_DIR_NAME_IMAGE = "image"
@@ -23,16 +23,26 @@ DATASET_DIR_NAME_SEGMASK = "segmask"
 RESULT_DIR_NAME_DENSE = "dense"
 RESULT_DIR_NAME_VIS = "vis"
 
-CAMERA_CATEGORIES = [
-    "CAM_FRONT_WIDE",
-    "CAM_FRONT_NARROW",
-    "CAM_FRONT_RIGHT",
-    "CAM_FRONT_LEFT",
-    "CAM_BACK_RIGHT",
-    "CAM_BACK_LEFT",
-    "CAM_BACK_WIDE",
-    "CAM_BACK_NARROW",
-]
+
+def filterout(li: list[Any], flags: list[bool]) -> list[Any]:
+    """Filter elements in `li` based on corresponding boolean flags.
+
+    Args:
+        li (list[Any]): The list of values to filter.
+        flags (list[bool]): A list of boolean values of the same length as `li`.
+            Each True flag retains the corresponding element from `li`, False discards it.
+
+    Returns:
+        list[Any]: A new list containing only the items from `li` where the corresponding flag is True.
+
+    Raises:
+        ValueError: If `li` and `flags` have different lengths.
+    """  # noqa: E501
+    if len(li) != len(flags):
+        raise ValueError(
+            f"Length of list {len(li)} must be equal to length of flags {len(flags)}"
+        )
+    return [item for item, flag in zip(li, flags, strict=True) if flag]
 
 
 def calc_bins(
@@ -54,7 +64,7 @@ def calc_bins(
 
     Raises:
         ValueError: If lower_bound is greater than or equal to upper_bound
-    """
+    """  # noqa: E501
     if lower_bound >= upper_bound:
         raise ValueError(
             f"Lower bound {lower_bound} must be less than upper bound {upper_bound}"
@@ -103,7 +113,7 @@ def find_dataset_dirs(root: Path) -> list[Path]:
     return ret
 
 
-def load_csv(path: Path, columns: dict[str, type]) -> dict[str, list[Any]]:
+def load_csv(path: Path, columns: dict[str, type]) -> list[dict[str, Any]]:
     """Load a CSV file from disk with column selection and type conversion.
 
     Args:
@@ -112,27 +122,29 @@ def load_csv(path: Path, columns: dict[str, type]) -> dict[str, list[Any]]:
             to their desired types.
 
     Returns:
-        dict[str, list[Any]]: A dictionary mapping column names to lists of values.
+        list[dict[str, Any]]: A list of dictionaries, where each dictionary represents
+            a row with column names as keys and converted values as values.
 
     Raises:
         ValueError: If any of the required columns are missing from the CSV file.
 
     Examples:
-        >>> # Get specific columns with type conversion
-        >>> data = load_csv(
+        >>> # Get rows as dictionaries with type conversion
+        >>> rows = load_csv(
         ...     Path("data.csv"),
         ...     columns={"id": int, "value": float, "name": str}
         ... )
-        >>> ids = data["id"]  # List of integers
-        >>> values = data["value"]  # List of floats
+        >>> first_row = rows[0]  # Dictionary with keys "id", "value", "name"
+        >>> all_ids = [row["id"] for row in rows]  # List of all IDs
     """  # noqa: E501
 
     with open(path, "r", newline="") as csvfile:
         reader = csv.reader(csvfile)
         data = list(reader)
 
+        # Filter out empty rows
         header = data[0]
-        rows = data[1:]
+        rows = [row for row in data[1:] if row and any(cell.strip() for cell in row)]
 
         # Check if all required columns exist in the CSV
         missing_columns = [col for col in columns if col not in header]
@@ -145,18 +157,56 @@ def load_csv(path: Path, columns: dict[str, type]) -> dict[str, list[Any]]:
         # Create a mapping from column name to index
         col_indices = {col: header.index(col) for col in columns}
 
-        # Initialize result dictionary
-        result: dict[str, list[Any]] = {col: [] for col in columns}
+        # Initialize result list
+        result: list[dict[str, Any]] = []
 
         # Extract and convert values
         for row in rows:
+            row_dict: dict[str, Any] = {}
             for col, idx in col_indices.items():
                 if idx < len(row):
                     value = row[idx]
                     value = columns[col](value)  # Data type conversion
-                    result[col].append(value)
+                    row_dict[col] = value
+            result.append(row_dict)
 
         return result
+
+
+def load_segmap(csv_path: Path) -> dict[str, Any]:
+    """Load segmentation mapping data from a CSV file.
+
+    This function loads a segmentation mapping file that defines class IDs, names,
+    and RGB color values for each segmentation class. It converts the raw CSV data
+    into a structured dictionary format suitable for segmentation processing.
+
+    Args:
+        csv_path (Path): Path to the CSV file containing segmentation mapping data.
+            The CSV must have columns: 'id', 'name', 'r', 'g', 'b'.
+
+    Returns:
+        dict[str, Any]: A dictionary containing:
+            - 'name': A list of class names indexed by class ID
+            - 'color': A list of RGB color tuples indexed by class ID
+
+    Examples:
+        >>> segmap = load_segmap(Path("segmentation/map.csv"))
+        >>> class_names = segmap["name"]  # List of class names
+        >>> rgb_colors = segmap["color"]  # List of RGB color tuples
+        >>> print(f"Class {class_names[1]} has color {rgb_colors[1]}")
+    """
+    segmap = load_csv(
+        csv_path, columns={"id": int, "name": str, "r": int, "g": int, "b": int}
+    )
+    ret = {
+        "name": [""] * len(segmap),
+        "color": [tuple() for _ in range(len(segmap))],
+    }
+    for row in segmap:
+        class_id = row["id"]
+        ret["name"][class_id] = row["name"]
+        ret["color"][class_id] = (row["r"], row["g"], row["b"])
+    return ret
 
 
 def is_array_path(path: Path) -> bool:
@@ -201,25 +251,6 @@ def load_array(path: Path) -> np.ndarray:
     elif path.suffix == ".npz":
         return np.load(path)["arr_0"]
     return np.load(path)
-
-
-def load_tensor(path: Path) -> torch.Tensor:
-    """Load a numpy array from disk and convert it to a PyTorch tensor.
-
-    Args:
-        path (Path): Path to the numpy array file. Supports .npy (uncompressed numpy),
-            .npz (numpy compressed), and .bl2 (blosc2 compressed) formats.
-
-    Returns:
-        torch.Tensor: The loaded array as a PyTorch tensor.
-
-    Example:
-        >>> # Load array as tensor
-        >>> tensor = load_tensor(Path("array.npy"))
-    """
-    array = load_array(path)
-    tensor = torch.from_numpy(array)
-    return tensor
 
 
 def visualize_depth(
@@ -268,7 +299,12 @@ def visualize_depth(
     # Visualize each depth map and stack results
     visualized = torch.stack(
         [
-            MarigoldImageProcessor.colormap(depth_map[0], cmap=color_map, bytes=True)
+            cast(
+                torch.Tensor,
+                MarigoldImageProcessor.colormap(
+                    depth_map[0], cmap=color_map, bytes=True
+                ),
+            )
             for depth_map in depth_maps
         ],
         dim=0,
@@ -278,6 +314,25 @@ def visualize_depth(
     visualized = visualized.permute(0, 3, 1, 2)
 
     return visualized
+
+
+def load_tensor(path: Path) -> torch.Tensor:
+    """Load a numpy array from disk and convert it to a PyTorch tensor.
+
+    Args:
+        path (Path): Path to the numpy array file. Supports .npy (uncompressed numpy),
+            .npz (numpy compressed), and .bl2 (blosc2 compressed) formats.
+
+    Returns:
+        torch.Tensor: The loaded array as a PyTorch tensor.
+
+    Example:
+        >>> # Load array as tensor
+        >>> tensor = load_tensor(Path("array.npy"))
+    """
+    array = load_array(path)
+    tensor = torch.from_numpy(array)
+    return tensor
 
 
 def load_tensors(paths: list[Path], num_threads: int = 1) -> list[torch.Tensor]:
@@ -359,7 +414,7 @@ def load_arrays(paths: list[Path], num_threads: int = 1) -> list[np.ndarray]:
     return results
 
 
-def save_img(img: torch.Tensor, path: Path) -> None:
+def save_img_tensor(img: torch.Tensor, path: Path) -> None:
     """Save a PyTorch tensor image to disk as an image file.
 
     This function handles the conversion of tensor data to image format and saves it to disk.
@@ -704,56 +759,6 @@ def load_img_array(path: Path, mode: str | None = None) -> np.ndarray | None:
     return img
 
 
-def load_img_arrays(
-    paths: list[Path], mode: str | None = None, num_threads: int = 1
-) -> list[np.ndarray | None]:
-    """Load multiple images from file paths in parallel using multithreading.
-
-    Opens multiple image files using OpenCV in parallel and optionally converts them
-    to a specific color mode. Returns a list of loaded images as numpy arrays or None
-    for images that couldn't be loaded.
-
-    Args:
-        paths (list[Path]): List of paths to the image files to load
-        mode (str | None, optional): Color mode to convert images
-            to (e.g. 'RGB', 'BGR', 'L'). If None, automatically determines mode
-            based on image channels (RGB for 3 channels, L for 1 channel).
-            Defaults to None.
-        num_threads (int, optional): Number of worker threads to use.
-            Defaults to 1.
-
-    Returns:
-        list[np.ndarray | None]: A list of loaded images as numpy arrays, or None for
-            images that couldn't be loaded.
-
-    Example:
-        >>> # Load multiple RGB images in parallel
-        >>> image_paths = [Path("image1.jpg"), Path("image2.jpg"), Path("image3.jpg")]
-        >>> results = load_imgs(image_paths, mode="RGB", num_threads=8)
-        >>> for img in results:
-        ...     if img is not None:
-        ...         # Process valid image
-        ...         pass
-    """  # noqa: E501
-    if not paths:
-        return []
-
-    # For single-threaded execution, use simple loop instead of ThreadPoolExecutor
-    if num_threads == 1:
-        return [load_img_array(path, mode) for path in paths]
-
-    # Define worker function that calls load_img
-    def worker(path: Path) -> np.ndarray | None:
-        return load_img_array(path, mode)
-
-    # Use ThreadPoolExecutor for parallel loading with executor.map to preserve order
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-        # map preserves the order of the input paths in the results
-        results = list(executor.map(worker, paths))
-
-    return results
-
-
 def load_img_tensors(
     paths: list[Path],
     mode: str | None = None,
@@ -892,9 +897,9 @@ def make_grid(
                 )
 
             # Resize directly without creating a transform object
-            grid = torchvision.transforms.functional.resize(
+            grid = TF.resize(
                 grid.unsqueeze(0),
-                (target_h, target_w),
+                [target_h, target_w],
                 interpolation=mode,
                 antialias=antialias,
             ).squeeze(0)
@@ -914,7 +919,60 @@ def has_nan(x: np.ndarray | torch.Tensor) -> bool:
     if isinstance(x, torch.Tensor):
         return bool(torch.isnan(x).any().item())
     else:
-        return np.isnan(x).any()
+        return bool(np.isnan(x).any())
+
+
+def to_segmask(
+    imgs: torch.Tensor, colormap: list[tuple[int, int, int]]
+) -> torch.Tensor:
+    """Convert RGB segmentation images to class ID segmentation masks.
+
+    This function takes a batch of RGB segmentation images where each color represents
+    a class ID, and converts them to single-channel masks where pixel values correspond
+    to class IDs based on the provided colormap.
+
+    Args:
+        imgs (torch.Tensor): Input RGB segmentation images as a 4D tensor with shape
+            [N, 3, H, W] where N is batch size, 3 is RGB channels, and H,W are spatial dimensions.
+        colormap (list[tuple[int, int, int]]): List of RGB tuples defining the color
+            for each class ID. The index in this list becomes the class ID in the output mask.
+
+    Returns:
+        torch.Tensor: Segmentation masks as a 4D tensor with shape [N, 1, H, W],
+            where values are class IDs corresponding to the input colormap.
+
+    Raises:
+        ValueError: If input tensor doesn't have shape [N, 3, H, W].
+        ValueError: If any pixel value is outside valid class ID range (0 to len(colormap)-1).
+
+    Example:
+        >>> # Define colormap where:
+        >>> # - class 0 is black (0,0,0)
+        >>> # - class 1 is white (255,255,255)
+        >>> colormap = [(0,0,0), (255,255,255)]
+        >>> # Convert RGB segmentation images to class ID masks
+        >>> masks = to_segmask(rgb_images, colormap)
+        >>> # masks will have shape [N,1,H,W] with values 0 or 1
+    """  # noqa: E501
+    if imgs.ndim != 4 or imgs.shape[1] != 3:
+        raise ValueError("Input must be a 4D tensor with shape [N, 3, H, W]")
+    N, _, H, W = imgs.shape
+    segmasks = torch.zeros(N, 1, H, W, dtype=imgs.dtype, device=imgs.device)
+    for class_id, rgb in enumerate(colormap):
+        r, g, b = rgb
+        # imgs.shape = [N, 3, H, W]
+        masks = (
+            (
+                imgs
+                == torch.tensor(
+                    [r, g, b], dtype=imgs.dtype, device=imgs.device
+                ).reshape(1, 3, 1, 1)
+            )
+            .all(dim=1)
+            .unsqueeze(1)
+        )  # [N, 1, H, W]
+        segmasks[masks] = class_id
+    return segmasks
 
 
 def to_depth(
@@ -927,37 +985,18 @@ def to_depth(
     specified floating-point dtype and maps them linearly to [0, max_distance].
 
     Args:
-        imgs (torch.Tensor): Input image tensor with shape (..., C) or (..., 1)
-            where the first channel contains depth-encoded intensities in [0, 255].
+        imgs (torch.Tensor): Input image tensor with shape [N, 3, H, W]
+            where the first channel (index 0) contains depth-encoded intensities in [0, 255].
         dtype (torch.dtype, optional): Desired output data type (e.g., torch.float32).
             Defaults to torch.float32.
         max_distance (float, optional): Maximum depth value corresponding to
             intensity=255. Defaults to 120.0.
 
     Returns:
-        torch.Tensor: Depth map tensor with the same spatial dimensions as the input,
+        torch.Tensor: Depth map tensor with shape [N, 1, H, W],
             values scaled to [0, max_distance] and cast to `dtype`.
-    """
-    return max_distance * imgs.to(dtype)[..., 0] / 255.0
-
-
-def to_depth_map(
-    img: np.ndarray, dtype: str = "float32", max_distance: float = 120.0
-) -> np.ndarray:
-    """Convert an RGB image array to a depth map.
-
-    Args:
-        img (np.ndarray): Input image array in RGB format
-        dtype (str, optional): Data type for output array. Defaults to "float32".
-        max_distance (float, optional): Maximum depth value in meters.
-                                        Defaults to 120.0.
-
-    Returns:
-        np.ndarray: Depth map as numpy array with values ranging from 0 to max_distance,
-                   where 0 represents the closest depth and max_distance the farthest.
-                   The function uses only the red channel (index 0) of the RGB image.
     """  # noqa: E501
-    return max_distance * np.array(img, dtype=dtype)[..., 0] / 255.0
+    return max_distance * (imgs.to(dtype)[:, 0] / 255.0).unsqueeze(1)
 
 
 def is_img_file(path: Path) -> bool:
@@ -1006,7 +1045,7 @@ def find_file_with_exts(path: Path, exts: list[str] | None = None) -> Path | Non
     Examples:
         >>> # Check if 'data.npy' exists, or try 'data.npz' and 'data.bl2'
         >>> file_path = find_file_with_exts(Path('data.npy'), ['.npz', '.bl2'])
-    """
+    """  # noqa: E501
     if path.exists() and path.is_file():
         return path
 

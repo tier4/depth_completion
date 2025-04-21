@@ -1,7 +1,7 @@
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import click
 import torch
@@ -372,10 +372,29 @@ def main(
     img_paths_all: dict[str, list[Path]] = {}
     sparse_paths_all: dict[str, list[Path]] = {}
     segmask_paths_all: dict[str, list[Path]] = {}
+    segmaps: dict[str, dict[str, Any]] = {}
     for dataset_dir in dataset_dirs:
         # Check if segmentation directory exists
         segmask_dir = dataset_dir / utils.DATASET_DIR_NAME_SEGMASK
         has_segmask_dir = segmask_dir.exists()
+
+        # Load segmentation mapping file
+        if use_segmask:
+            if has_segmask_dir:
+                segmap_path = segmask_dir / "map.csv"
+                if not segmap_path.exists():
+                    logger.error(f"No segmentation mapping file found at {segmap_path}")
+                    logger.error(
+                        f"Segmentation masks will not be used for {dataset_dir.name}"
+                    )
+                    has_segmask_dir = False
+                else:
+                    segmaps[dataset_dir.name] = utils.load_segmap(segmap_path)
+            else:
+                logger.error(
+                    f"No segmentation directory found at {segmask_dir}. "
+                    f"Segmentation masks will not be used for {dataset_dir.name}"
+                )
 
         # Find paths of input images
         img_dir = dataset_dir / utils.DATASET_DIR_NAME_IMAGE
@@ -389,19 +408,15 @@ def main(
         img_paths_: list[Path] = []
         segmask_paths: list[Path] = []
         for path in img_paths:
-            sparse_path = utils.find_file_with_exts(
-                (sparse_dir / path.relative_to(img_dir)).with_suffix(".npy"),
-                utils.NPARRAY_EXTS,
-            )
-            if sparse_path is None:
+            sparse_path = sparse_dir / path.relative_to(img_dir).with_suffix(".png")
+            if not sparse_path.exists():
                 logger.warning(f"No sparse depth map found for image {path} (skipped)")
                 continue
             if use_segmask and has_segmask_dir:
-                segmask_path = utils.find_file_with_exts(
-                    (segmask_dir / path.relative_to(img_dir)).with_suffix(".npy"),
-                    utils.NPARRAY_EXTS,
+                segmask_path = segmask_dir / path.relative_to(img_dir).with_suffix(
+                    ".png"
                 )
-                if segmask_path is None:
+                if not segmask_path.exists():
                     logger.warning(
                         f"No segmentation mask found for image {path} (skipped)"
                     )
@@ -432,7 +447,9 @@ def main(
         img_paths = img_paths_all[dataset_dir.name]
         sparse_paths = sparse_paths_all[dataset_dir.name]
         segmask_paths = segmask_paths_all[dataset_dir.name]
-        has_segmask = len(segmask_paths) > 0
+        has_segmask = (
+            len(segmask_paths) == len(img_paths) and dataset_dir.name in segmaps
+        )
         progbar = tqdm.tqdm(
             total=len(img_paths),
             dynamic_ncols=True,
@@ -452,61 +469,62 @@ def main(
             # Load images
             time_io = 0.0
             stime_io = time.time()
-            ret = utils.load_img_tensors(
+            imgs_list = utils.load_img_tensors(
                 batch_img_paths,
                 mode="RGB",
                 num_threads=len(batch_img_paths),
             )
 
-            # Check if all images failed to load
-            if all(img is None for img in ret):
-                logger.warning(
-                    f"All images in batch {i//batch_size + 1} failed to load (skipped)"
+            # Load sparse depth maps
+            sparses_list = utils.load_img_tensors(
+                batch_sparse_paths,
+                mode="RGB",
+                num_threads=len(batch_sparse_paths),
+            )
+
+            # Load segmentation masks if provided
+            segmasks_list: list[torch.Tensor | None] = [None] * len(imgs_list)
+            if use_segmask and has_segmask:
+                segmasks_list = utils.load_img_tensors(
+                    batch_segmask_paths,
+                    mode="RGB",
+                    num_threads=len(batch_segmask_paths),
                 )
+
+            # Get flags indicating successful loading
+            ok: list[bool] = []
+            for img, sparse, segmask in zip(
+                imgs_list, sparses_list, segmasks_list, strict=True
+            ):
+                flag = img is not None and sparse is not None
+                if use_segmask and has_segmask:
+                    flag = flag and segmask is not None
+                ok.append(flag)
+            if not any(ok):
+                logger.error("All images in batch failed to load (skipped)")
                 progbar.update(bs)
                 continue
 
-            # Process loaded images
-            batch_img_paths = [
-                batch_img_paths[j] for j in range(len(ret)) if ret[j] is not None
-            ]
-            batch_imgs = torch.stack(
-                [img for img in ret if img is not None], dim=0
-            ).cuda(non_blocking=True)
-
-            # Load sparse depth maps
-            batch_sparse_paths = [
-                batch_sparse_paths[j] for j in range(len(ret)) if ret[j] is not None
-            ]
-            batch_sparses = (
-                torch.stack(
-                    utils.load_tensors(
-                        batch_sparse_paths,
-                        num_threads=len(batch_sparse_paths),
-                    ),
-                    dim=0,
-                )
-                .unsqueeze(1)
-                .cuda(non_blocking=True)
-            )  # [N, 1, H, W]
-
-            # Load segmentation masks if provided
+            # Filter out input pairs missing any of the required data
+            batch_img_paths = utils.filterout(batch_img_paths, ok)
+            batch_sparse_paths = utils.filterout(batch_sparse_paths, ok)
+            imgs_list = utils.filterout(imgs_list, ok)
+            sparses_list = utils.filterout(sparses_list, ok)
             if use_segmask and has_segmask:
-                batch_segmask_paths = [
-                    batch_segmask_paths[j]
-                    for j in range(len(ret))
-                    if ret[j] is not None
-                ]
-                batch_segmasks = torch.stack(
-                    utils.load_tensors(
-                        batch_segmask_paths,
-                        num_threads=len(batch_segmask_paths),
-                    ),
-                    dim=0,
-                ).cuda(
-                    non_blocking=True
-                )  # [N, H, W]
-                batch_segmasks = batch_segmasks.unsqueeze(1)  # [N, 1, H, W]
+                batch_segmask_paths = utils.filterout(batch_segmask_paths, ok)
+                segmasks_list = utils.filterout(segmasks_list, ok)
+
+            # Create batch tensors and transfer to GPU
+            batch_imgs = torch.stack(imgs_list).cuda(non_blocking=True)
+            batch_sparses = torch.stack(sparses_list).cuda(non_blocking=True)
+            batch_sparses = utils.to_depth(batch_sparses, max_distance=max_depth)
+            if use_segmask and has_segmask:
+                segmap = segmaps[dataset_dir.name]
+                # TODO: Implement rest of codes later
+                batch_segmasks = torch.stack(segmasks_list).cuda(non_blocking=True)  # type: ignore
+                batch_segmasks = utils.to_segmask(batch_segmasks, segmap["color"])
+            else:
+                batch_segmasks = None
             time_io += time.time() - stime_io
 
             ############################################################
@@ -528,8 +546,8 @@ def main(
                 kl_weight=kl_weight,
                 beta=beta,
             )
-            assert isinstance(batch_denses, torch.Tensor)
-            assert isinstance(batch_pred_latents, torch.Tensor)
+            batch_denses = cast(torch.Tensor, batch_denses)
+            batch_pred_latents = cast(torch.Tensor, batch_pred_latents)
             if use_prev_latent:
                 # Set as previous latent variables
                 batch_pred_latents_prev = batch_pred_latents
@@ -601,7 +619,7 @@ def main(
                         / img_path.relative_to(img_dir)
                     ).parent
                     save_path = save_dir / f"{img_path.stem}_vis.jpg"
-                    utils.save_img(grid_img, save_path)
+                    utils.save_img_tensor(grid_img, save_path)
                     time_io += time.time() - stime_io
 
             postfix["time/io"] = time_io
