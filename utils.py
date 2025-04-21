@@ -15,10 +15,11 @@ from diffusers.pipelines.marigold.marigold_image_processing import (
 )
 
 NPARRAY_EXTS = [".npy", ".npz", ".bl2"]
+IMAGE_EXTS = [".jpg", ".png"]
 
 DATASET_DIR_NAME_SPARSE = "sparse"
 DATASET_DIR_NAME_IMAGE = "image"
-DATASET_DIR_NAME_SEG = "seg"
+DATASET_DIR_NAME_SEGMASK = "segmask"
 RESULT_DIR_NAME_DENSE = "dense"
 RESULT_DIR_NAME_VIS = "vis"
 
@@ -914,6 +915,30 @@ def has_nan(x: np.ndarray | torch.Tensor) -> bool:
         return bool(torch.isnan(x).any().item())
     else:
         return np.isnan(x).any()
+
+
+def to_depth(
+    imgs: torch.Tensor, dtype: torch.dtype = torch.float32, max_distance: float = 120.0
+) -> torch.Tensor:
+    """Convert a normalized depth image tensor to a depth map.
+
+    Given an input tensor where pixel intensity in the first channel encodes
+    depth in the range [0, 255], this function rescales and casts values to the
+    specified floating-point dtype and maps them linearly to [0, max_distance].
+
+    Args:
+        imgs (torch.Tensor): Input image tensor with shape (..., C) or (..., 1)
+            where the first channel contains depth-encoded intensities in [0, 255].
+        dtype (torch.dtype, optional): Desired output data type (e.g., torch.float32).
+            Defaults to torch.float32.
+        max_distance (float, optional): Maximum depth value corresponding to
+            intensity=255. Defaults to 120.0.
+
+    Returns:
+        torch.Tensor: Depth map tensor with the same spatial dimensions as the input,
+            values scaled to [0, max_distance] and cast to `dtype`.
+    """
+    return max_distance * imgs.to(dtype)[..., 0] / 255.0
 
 
 def to_depth_map(

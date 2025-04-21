@@ -226,10 +226,10 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "--use-seg",
+    "--use-segmask",
     type=bool,
     default=False,
-    help="Whether to use segmentation maps for depth completion.",
+    help="Whether to use segmentation masks for depth completion.",
     show_default=True,
 )
 def main(
@@ -259,7 +259,7 @@ def main(
     batch_size: int,
     kl_penalty: bool,
     kl_weight: float,
-    use_seg: bool,
+    use_segmask: bool,
 ) -> None:
     # Set log level
     logger.remove()
@@ -371,11 +371,11 @@ def main(
     # Find images and sparse depth maps by dataset directory
     img_paths_all: dict[str, list[Path]] = {}
     sparse_paths_all: dict[str, list[Path]] = {}
-    seg_paths_all: dict[str, list[Path]] = {}
+    segmask_paths_all: dict[str, list[Path]] = {}
     for dataset_dir in dataset_dirs:
         # Check if segmentation directory exists
-        seg_dir = dataset_dir / utils.DATASET_DIR_NAME_SEG
-        has_seg_dir = seg_dir.exists()
+        segmask_dir = dataset_dir / utils.DATASET_DIR_NAME_SEGMASK
+        has_segmask_dir = segmask_dir.exists()
 
         # Find paths of input images
         img_dir = dataset_dir / utils.DATASET_DIR_NAME_IMAGE
@@ -383,11 +383,11 @@ def main(
         img_paths.sort(key=lambda x: x.name)
 
         # Find paths of input sparse depth maps and paired images
-        # and optionally segmentation maps
+        # and optionally segmentation masks
         sparse_dir = dataset_dir / utils.DATASET_DIR_NAME_SPARSE
         sparse_paths: list[Path] = []
         img_paths_: list[Path] = []
-        seg_paths: list[Path] = []
+        segmask_paths: list[Path] = []
         for path in img_paths:
             sparse_path = utils.find_file_with_exts(
                 (sparse_dir / path.relative_to(img_dir)).with_suffix(".npy"),
@@ -396,24 +396,24 @@ def main(
             if sparse_path is None:
                 logger.warning(f"No sparse depth map found for image {path} (skipped)")
                 continue
-            if use_seg and has_seg_dir:
-                seg_path = utils.find_file_with_exts(
-                    (seg_dir / path.relative_to(img_dir)).with_suffix(".npy"),
+            if use_segmask and has_segmask_dir:
+                segmask_path = utils.find_file_with_exts(
+                    (segmask_dir / path.relative_to(img_dir)).with_suffix(".npy"),
                     utils.NPARRAY_EXTS,
                 )
-                if seg_path is None:
+                if segmask_path is None:
                     logger.warning(
-                        f"No segmentation map found for image {path} (skipped)"
+                        f"No segmentation mask found for image {path} (skipped)"
                     )
                     continue
-                seg_paths.append(seg_path)
+                segmask_paths.append(segmask_path)
             sparse_paths.append(sparse_path)
             img_paths_.append(path)
         if len(img_paths_) == 0:
             logger.critical("No valid input pairs found")
             sys.exit(1)
         img_paths = img_paths_
-        seg_paths_all[dataset_dir.name] = seg_paths
+        segmask_paths_all[dataset_dir.name] = segmask_paths
         img_paths_all[dataset_dir.name] = img_paths
         sparse_paths_all[dataset_dir.name] = sparse_paths
         logger.info(f"Found {len(img_paths):,} input pairs for {dataset_dir.name}")
@@ -431,8 +431,8 @@ def main(
         sparse_dir = dataset_dir / utils.DATASET_DIR_NAME_SPARSE
         img_paths = img_paths_all[dataset_dir.name]
         sparse_paths = sparse_paths_all[dataset_dir.name]
-        seg_paths = seg_paths_all[dataset_dir.name]
-        has_seg = len(seg_paths) > 0
+        segmask_paths = segmask_paths_all[dataset_dir.name]
+        has_segmask = len(segmask_paths) > 0
         progbar = tqdm.tqdm(
             total=len(img_paths),
             dynamic_ncols=True,
@@ -443,7 +443,7 @@ def main(
         for i in range(0, len(img_paths), batch_size):
             batch_img_paths = img_paths[i : i + batch_size]
             batch_sparse_paths = sparse_paths[i : i + batch_size]
-            batch_seg_paths = seg_paths[i : i + batch_size]
+            batch_segmask_paths = segmask_paths[i : i + batch_size]
             bs = len(batch_img_paths)
 
             ############################################################
@@ -490,21 +490,23 @@ def main(
                 .cuda(non_blocking=True)
             )  # [N, 1, H, W]
 
-            # Load segmentation maps if provided
-            if use_seg and has_seg:
-                batch_seg_paths = [
-                    batch_seg_paths[j] for j in range(len(ret)) if ret[j] is not None
+            # Load segmentation masks if provided
+            if use_segmask and has_segmask:
+                batch_segmask_paths = [
+                    batch_segmask_paths[j]
+                    for j in range(len(ret))
+                    if ret[j] is not None
                 ]
-                batch_segs = torch.stack(
+                batch_segmasks = torch.stack(
                     utils.load_tensors(
-                        batch_seg_paths,
-                        num_threads=len(batch_seg_paths),
+                        batch_segmask_paths,
+                        num_threads=len(batch_segmask_paths),
                     ),
                     dim=0,
                 ).cuda(
                     non_blocking=True
                 )  # [N, H, W]
-                batch_segs = batch_segs.unsqueeze(1)  # [N, 1, H, W]
+                batch_segmasks = batch_segmasks.unsqueeze(1)  # [N, 1, H, W]
             time_io += time.time() - stime_io
 
             ############################################################
