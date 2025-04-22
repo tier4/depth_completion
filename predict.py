@@ -73,6 +73,21 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
+    "--min-depth",
+    type=click.FloatRange(min=0, min_open=True),
+    default=0.1,
+    help="Min absolute distance [m] of input sparse depth maps. "
+    "Used when --inv-depth=True.",
+    show_default=True,
+)
+@click.option(
+    "--inv-depth",
+    type=bool,
+    default=False,
+    help="Whether to use inverse depth for computing loss functions.",
+    show_default=True,
+)
+@click.option(
     "-v",
     "--vis",
     type=bool,
@@ -260,6 +275,8 @@ def main(
     steps: int,
     res: int,
     max_depth: float,
+    min_depth: float,
+    inv_depth: bool,
     save_dense: bool,
     vis: bool,
     vis_res: tuple[int, int],
@@ -545,6 +562,8 @@ def main(
                 batch_imgs,
                 batch_sparses,
                 max_depth,
+                min_depth=min_depth,
+                inv_depth=inv_depth,
                 pred_latents_prev=batch_pred_latents_prev,
                 steps=steps,
                 resolution=res,
