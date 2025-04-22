@@ -536,8 +536,8 @@ def main(
             batch_denses, batch_pred_latents = pipe(
                 batch_imgs,
                 batch_sparses,
+                max_depth,
                 pred_latents_prev=batch_pred_latents_prev,
-                max_depth=max_depth,
                 steps=steps,
                 resolution=res,
                 interp_mode=interp_mode,

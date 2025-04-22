@@ -189,8 +189,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         self,
         imgs: torch.Tensor,
         sparses: torch.Tensor,
+        max_depth: float,
         pred_latents_prev: torch.Tensor | None = None,
-        max_depth: float | None = None,
         steps: int = 50,
         resolution: int = 768,
         opt: str = "adam",
@@ -216,11 +216,11 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             sparses (torch.Tensor): Batch of sparse depth maps with shape [N, 1, H, W].
                 Should have zeros at missing positions and positive values at measurement points.
                 Raw depth values, not normalized.
+            max_depth (float): Maximum depth value for normalization.
+                Used to normalize depth values to [0, 1] range.
             pred_latents_prev (torch.Tensor | None, optional): Previous prediction latents
                 with shape [N, 4, EH, EW] from a prior frame or iteration.
                 Enables temporal consistency when processing video sequences. Defaults to None.
-            max_depth (float | None, optional): Maximum depth value for normalization.
-                If None, uses per-sample maximum. Defaults to None.
             steps (int, optional): Number of denoising steps.
                 Higher values give better quality but slower inference. Defaults to 50.
             resolution (int, optional): Resolution for internal processing.
@@ -252,7 +252,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
         Returns:
             tuple[torch.Tensor, torch.Tensor]:
-                - Dense depth prediction with shape [N, 1, H, W]
+                - Dense depth prediction with shape [N, 1, H, W] in metric units (same as input sparse depth)
                 - Prediction latents with shape [N, 4, EH, EW] that can be used for temporal consistency
                   in subsequent frames
         """  # noqa: E501
@@ -331,18 +331,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             dtype=self.dtype,
         )  # [N, C, PPH, PPW]
 
-        # Preprocess sparse depth maps
-        if max_depth is None:
-            # Normalize by per-sample max
-            max_depths = torch.amax(
-                sparses, dim=(1, 2, 3), keepdim=True
-            )  # [N, 1, 1, 1]
-        else:
-            # Normalize by absolute max specified by user
-            max_depths = (
-                torch.ones(len(sparses), 1, 1, 1, device=self.device) * max_depth
-            )  # [N, 1, 1, 1]
-        sparses_normed = sparses / max_depths
+        # Normalize sparse depth map
+        sparses_normed = torch.clamp(sparses, min=0, max=max_depth) / max_depth
 
         # Get latent encodings
         with torch.no_grad():
@@ -508,5 +498,5 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 orig_size,
             )  # [N, 1, H, W]
             # Decode
-            denses *= max_depths
+            denses *= max_depth
         return denses, pred_latents_detached
