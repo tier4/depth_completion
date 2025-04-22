@@ -46,3 +46,4 @@ exclude = [
 ]
 typeCheckingMode = "standard"
 reportPrivateImportUsage = "none"
+reportIncompatibleMethodOverride = "none"
