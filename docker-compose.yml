@@ -16,8 +16,8 @@ services:
     command: tail -f /dev/null
     volumes:
       - type: bind
-        source: ~/.vimrc
-        target: /home/user/.vimrc
+        source: ${SRC_DATA_DIR}
+        target: /home/user/dev/data
         consistency: delegated
       - type: bind
         source: ~/.ssh
