@@ -1,3 +1,5 @@
+from typing import cast
+
 import diffusers
 import torch
 from diffusers import MarigoldDepthPipeline
@@ -126,64 +128,80 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         """
         Converts the model's affine-invariant depth representation to metric depth values.
 
-        This method applies an affine transformation to convert the depth predictions
+        This method applies an affine transformation to convert the normalized depth predictions
         from the model's internal representation to actual metric depth values that match
-        the scale and range of the provided sparse depth measurements.
+        the scale and range of the provided sparse depth measurements. The transformation
+        uses learned scale and shift parameters to ensure the output depth values are
+        properly calibrated to the input sparse measurements.
 
         Args:
-            dense (torch.Tensor): Affine-invariant depth predictions from the model with shape [N, 1, H, W].
-            scale (torch.Tensor): Scaling factor with shape [N, 1, H, W] or [N, 1, 1, 1].
-            shift (torch.Tensor): Shift factor with shape [N, 1, H, W] or [N, 1, 1, 1].
-            sparse_range (torch.Tensor): Range of sparse depth values with shape [N, 1, 1, 1].
+            dense (torch.Tensor): Normalized depth predictions from the model with shape [N, 1, H, W].
+            scale (torch.Tensor): Learned scaling factor with shape [N, 1, H, W] or [N, 1, 1, 1].
+            shift (torch.Tensor): Learned shift factor with shape [N, 1, H, W] or [N, 1, 1, 1].
+            sparse_range (torch.Tensor): Range (max-min) of sparse depth values with shape [N, 1, 1, 1].
             sparse_min (torch.Tensor): Minimum value of sparse depth with shape [N, 1, 1, 1].
 
         Returns:
-            torch.Tensor: Metric depth values with shape [N, 1, H, W].
+            torch.Tensor: Calibrated metric depth values with shape [N, 1, H, W] that match
+                          the scale of the input sparse depth measurements.
         """  # noqa: E501
         return (scale**2) * sparse_range * dense + (shift**2) * sparse_min
 
     def latent_to_dense(
         self,
         latent: torch.Tensor,  # [N, 4, EH, EW]
-        scale: torch.Tensor,  # [N, 1, H, W] or [N, 1, 1, 1]
-        shift: torch.Tensor,  # [N, 1, H, W] or [N, 1, 1, 1]
-        sparse_range: torch.Tensor,  # [N, 1, 1, 1]
-        sparse_min: torch.Tensor,  # [N, 1, 1, 1]
-        padding: tuple,
-        original_resolution: tuple,
+        orig_res: tuple[int, int],
+        padding: tuple[int, int],
+        affine_invariant: bool = False,
+        affine_params: tuple[torch.Tensor, torch.Tensor] | None = None,
+        sparse_range: tuple[torch.Tensor, torch.Tensor] | None = None,
         interp_mode: str = "bilinear",
     ) -> torch.Tensor:
         """
-        Converts latent representation to metric depth values.
+        Converts latent representation to dense depth map.
 
-        This method decodes the latent representation from the diffusion model,
-        removes padding, resizes to the original resolution, and applies an affine
-        transformation to convert to metric depth values.
+        This method decodes the latent representation from the diffusion model into a dense
+        depth map, applies unpadding, resizes to the original resolution, and optionally
+        applies affine transformation to match the scale of sparse depth measurements.
 
         Args:
-            latent (torch.Tensor): Latent representation from the diffusion model with shape [N, 4, EH, EW].
-            scale (torch.Tensor): Scaling factor with shape [N, 1, H, W] or [N, 1, 1, 1].
-            shift (torch.Tensor): Shift factor with shape [N, 1, H, W] or [N, 1, 1, 1].
-            sparse_range (torch.Tensor): Range of sparse depth values with shape [N, 1, 1, 1].
-            sparse_min (torch.Tensor): Minimum value of sparse depth with shape [N, 1, 1, 1].
-            padding (tuple): Padding values used during processing.
-            original_resolution (tuple): Original resolution (height, width) to resize the output to.
-            interp_mode (str, optional): Interpolation mode for resizing. Defaults to "bilinear".
+            latent (torch.Tensor): Latent representation with shape [N, 4, EH, EW].
+            orig_res (tuple[int, int]): Original resolution (H, W) to resize to.
+            padding (tuple[int, int]): Padding values to remove.
+            affine_invariant (bool, optional): Whether to apply affine transformation.
+                When True, the output will be transformed to match the scale of sparse depth.
+                Defaults to False.
+            affine_params (tuple[torch.Tensor, torch.Tensor] | None, optional):
+                Scale and shift parameters for affine transformation. Required when
+                affine_invariant is True. Defaults to None.
+            sparse_range (tuple[torch.Tensor, torch.Tensor] | None, optional):
+                Min and max values of sparse depth. Required when affine_invariant is True.
+                Defaults to None.
+            interp_mode (str, optional): Interpolation mode for resizing.
+                Options include "bilinear", "bicubic", etc. Defaults to "bilinear".
 
         Returns:
-            torch.Tensor: Metric depth values with shape [N, 1, H, W].
+            torch.Tensor: Dense depth map with shape [N, 1, H, W].
         """  # noqa: E501
-        affine_invariant_pred = self.decode_prediction(latent)  # [N, 1, PPH, PPW]
-        affine_invariant_pred = self.image_processor.unpad_image(
-            affine_invariant_pred, padding
-        )
-        affine_invariant_pred = self.image_processor.resize_antialias(
-            affine_invariant_pred, original_resolution, interp_mode
+        if affine_invariant:
+            if affine_params is None or sparse_range is None:
+                raise ValueError(
+                    "scaling and sparse_range must be "
+                    "provided when affine_invariant is True"
+                )
+        decoded = self.decode_prediction(latent)  # [N, 1, PPH, PPW]
+        decoded = self.image_processor.unpad_image(decoded, padding)
+        decoded_resized = self.image_processor.resize_antialias(
+            decoded, orig_res, interp_mode
         )  # [N, 1, H, W]
-        pred = self._affine_to_metric(
-            affine_invariant_pred, scale, shift, sparse_range, sparse_min
-        )
-        return pred  # [N, 1, H, W]
+        if affine_invariant:
+            assert affine_params is not None and sparse_range is not None
+            scale, shift = affine_params
+            sparse_min, sparse_max = sparse_range
+            decoded_resized = self._affine_to_metric(
+                decoded_resized, scale, shift, sparse_max - sparse_min, sparse_min
+            )
+        return decoded_resized  # [N, 1, H, W]
 
     def __call__(
         self,
@@ -193,6 +211,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         pred_latents_prev: torch.Tensor | None = None,
         steps: int = 50,
         resolution: int = 768,
+        affine_invariant: bool = True,
         opt: str = "adam",
         lr: tuple[float, float] | None = None,
         beta: float = 0.9,
@@ -225,6 +244,12 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 Higher values give better quality but slower inference. Defaults to 50.
             resolution (int, optional): Resolution for internal processing.
                 Higher values give better quality but use more memory. Defaults to 768.
+            affine_invariant (bool, optional): Whether to use affine invariant depth completion.
+                When True, the model applies affine transformations to handle arbitrary depth scales
+                and shifts between the model's internal representation and the input sparse depth.
+                This allows the model to work with different depth sensors and units without retraining.
+                The model will automatically estimate the appropriate scale and shift parameters
+                to align its predictions with the input sparse measurements. Defaults to True.
             opt (str, optional): Optimizer to use ("adam" or "sgd"). Defaults to "adam".
             lr (tuple[float, float] | None, optional): Learning rates for (latent, scaling).
                 If None, defaults to (0.05, 0.005).
@@ -324,12 +349,13 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         )  # [N, 4, EH, EW]
 
         # Preprocess input images
-        imgs_resized, padding, orig_size = self.image_processor.preprocess(
+        imgs_resized, padding, orig_res = self.image_processor.preprocess(
             imgs,
             processing_resolution=resolution,
             device=self.device,
             dtype=self.dtype,
         )  # [N, C, PPH, PPW]
+        orig_res = cast(tuple[int, int], orig_res)
 
         # Normalize sparse depth map
         sparses_normed = torch.clamp(sparses, min=0, max=max_depth) / max_depth
@@ -351,26 +377,44 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
         # Calculate min, max, and range for each sample in the batch [N] -> [N,1,1,1]
         sparse_masks = sparses_normed > 0
-        sparse_mins = torch.stack(
-            [s[m].min() for s, m in zip(sparses_normed, sparse_masks, strict=True)]
-        ).view(-1, 1, 1, 1)
-        sparse_maxs = torch.stack(
-            [s[m].max() for s, m in zip(sparses_normed, sparse_masks, strict=True)]
-        ).view(-1, 1, 1, 1)
-        sparse_ranges = sparse_maxs - sparse_mins
+        sparse_ranges = (
+            (
+                torch.stack(  # min
+                    [
+                        s[m].min()
+                        for s, m in zip(sparses_normed, sparse_masks, strict=True)
+                    ]
+                ).view(-1, 1, 1, 1),
+                torch.stack(  # max
+                    [
+                        s[m].max()
+                        for s, m in zip(sparses_normed, sparse_masks, strict=True)
+                    ]
+                ).view(-1, 1, 1, 1),
+            )
+            if affine_invariant
+            else None
+        )
 
-        # Set up scaling params
-        scale, shift = torch.nn.Parameter(
-            torch.ones(N, 1, 1, 1, device=self.device)
-        ), torch.nn.Parameter(torch.zeros(N, 1, 1, 1, device=self.device))
-        # [N, 1, 1, 1], [N, 1, 1, 1]
+        # Set scaling params
+        affine_params = (
+            (
+                # scale
+                torch.nn.Parameter(torch.ones(N, 1, 1, 1, device=self.device)),
+                # shift
+                torch.nn.Parameter(torch.zeros(N, 1, 1, 1, device=self.device)),
+            )
+            if affine_invariant
+            else None
+        )
 
         # Set up optimizer
         optimizer: torch.optim.Optimizer
         param_groups = [
-            {"params": [scale, shift], "lr": lr_scaling},
             {"params": [pred_latents], "lr": lr_latent},
         ]
+        if affine_params is not None:
+            param_groups.append({"params": list(affine_params), "lr": lr_scaling})
         if opt == "adam":
             optimizer = torch.optim.Adam(param_groups)
         elif opt == "sgd":
@@ -403,20 +447,22 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 ) * pred_latents  # [N, 4, EH, EW]
 
             # Preview the final output depth with Tweedie's formula
-            previews = self.scheduler.step(
-                pred_noises, t, pred_latents, generator=generator
-            ).pred_original_sample  # [N, 4, EH, EW]
+            previews = cast(
+                torch.Tensor,
+                self.scheduler.step(
+                    pred_noises, t, pred_latents, generator=generator
+                ).pred_original_sample,
+            )  # [N, 4, EH, EW]
 
             # Predict dense depth maps
             denses = self.latent_to_dense(
                 previews,
-                scale,
-                shift,
-                sparse_ranges,
-                sparse_mins,
+                orig_res,
                 padding,
-                orig_size,
-                interp_mode,
+                affine_invariant=affine_invariant,
+                affine_params=affine_params,
+                sparse_range=sparse_ranges,
+                interp_mode=interp_mode,
             )  # [N, 1, H, W]
             losses = compute_loss(denses, sparses_normed, loss_funcs, image=imgs)
 
@@ -490,12 +536,12 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             pred_latents_detached = pred_latents.detach()
             denses = self.latent_to_dense(
                 pred_latents_detached,
-                scale,
-                shift,
-                sparse_ranges,
-                sparse_mins,
+                orig_res,
                 padding,
-                orig_size,
+                affine_invariant=affine_invariant,
+                affine_params=affine_params,
+                sparse_range=sparse_ranges,
+                interp_mode=interp_mode,
             )  # [N, 1, H, W]
             # Decode
             denses *= max_depth

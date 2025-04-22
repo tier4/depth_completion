@@ -245,6 +245,13 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     help="Whether to use segmentation masks for depth completion.",
     show_default=True,
 )
+@click.option(
+    "--affine-invariant",
+    type=bool,
+    default=True,
+    help="Whether to use affine invariant depth completion.",
+    show_default=True,
+)
 def main(
     src_root: Path,
     dst_root: Path,
@@ -274,6 +281,7 @@ def main(
     kl_weight: float,
     kl_mode: str,
     use_segmask: bool,
+    affine_invariant: bool,
 ) -> None:
     # Set log level
     logger.remove()
@@ -548,6 +556,7 @@ def main(
                 kl_mode=kl_mode,
                 kl_weight=kl_weight,
                 beta=beta,
+                affine_invariant=affine_invariant,
             )
             batch_denses = cast(torch.Tensor, batch_denses)
             batch_pred_latents = cast(torch.Tensor, batch_pred_latents)

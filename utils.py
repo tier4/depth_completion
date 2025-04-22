@@ -480,13 +480,23 @@ def save_tensor(
 ) -> None:
     """Save a PyTorch tensor to disk with optional compression.
 
+    This function converts a PyTorch tensor to a NumPy array and saves it to disk.
+    It automatically handles device transfer (moving to CPU) and detaching from
+    computation graph. For floating point tensors that are not float32 or float64,
+    it automatically converts to float32 since NumPy doesn't support all PyTorch
+    floating point types.
+
     Args:
-        x (torch.Tensor): The PyTorch tensor to save
-        path (Path): Path where the tensor should be saved
-        compress (str | None, optional): The compression format to use.
-            "npz" uses numpy's compressed format, "bl2" uses blosc2 compression,
-            "npy" saves as uncompressed numpy format.
-            If None, saves uncompressed as .npy. Defaults to None.
+        x (torch.Tensor): The PyTorch tensor to save. Can be on any device and
+            of any dtype. Tensors with non-standard floating point types (not float32
+            or float64) will be converted to float32.
+        path (Path): Path where the tensor should be saved. The parent directory
+            will be created if it doesn't exist.
+        compress (str | None, optional): The compression format to use:
+            - "npz": Uses NumPy's compressed format (.npz extension)
+            - "bl2": Uses blosc2 compression (.bl2 extension)
+            - "npy": Saves as uncompressed NumPy format (.npy extension)
+            - None: Saves uncompressed as .npy (default)
 
     Raises:
         ValueError: If the file extension doesn't match the compression format:
@@ -501,6 +511,13 @@ def save_tensor(
         >>> save_tensor(tensor, Path("tensor.bl2"), compress="bl2")  # Save with blosc2 compression
         >>> save_tensor(tensor, Path("tensor.npy"), compress="npy")  # Explicitly save as .npy
     """  # noqa: E501
+    # Ensure the parent directory exists
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # NOTE: Convert tensor to float32 if its not a float32 or float64
+    # because other floating types are not supported by numpy
+    if torch.is_floating_point(x) and x.dtype not in [torch.float32, torch.float64]:
+        x = x.to(torch.float32)
     # Convert tensor to numpy array
     x_np = x.detach().cpu().numpy()
 
