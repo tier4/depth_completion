@@ -198,7 +198,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         beta: float = 0.9,
         kl_penalty: bool = False,
         kl_weight: float = 0.1,
-        kl_mode: str = "simple",
+        kl_mode: str = "simple-forward",
         interp_mode: str = "bilinear",
         loss_funcs: list[str] | None = None,
         seed: int = 2024,
@@ -242,7 +242,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                   More accurate but slightly more computationally expensive.
                 - "symmetric": Computes both forward and backward KL divergence for more robust regularization.
                   Most accurate but most computationally expensive.
-                Defaults to "simple".
+                Defaults to "simple-forward".
             interp_mode (str, optional): Interpolation mode for resizing.
                 Options include "bilinear", "bicubic", etc. Defaults to "bilinear".
             loss_funcs (list[str] | None, optional): Loss functions to use.
