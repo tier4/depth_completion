@@ -226,8 +226,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             resolution (int, optional): Resolution for internal processing.
                 Higher values give better quality but use more memory. Defaults to 768.
             opt (str, optional): Optimizer to use ("adam" or "sgd"). Defaults to "adam".
-            lr (tuple[float, float], optional): Learning rates for (latent, scaling).
-                Defaults to (0.05, 0.005).
+            lr (tuple[float, float] | None, optional): Learning rates for (latent, scaling).
+                If None, defaults to (0.05, 0.005).
             beta (float, optional): Momentum factor for prediction latents between frames.
                 Must be in range [0, 1]. Higher values give more weight to new latents,
                 while lower values preserve more information from previous frames. Defaults to 0.9.
@@ -236,10 +236,12 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             kl_weight (float, optional): Weight for KL divergence penalty.
                 Only used when kl_penalty is True. Defaults to 0.1.
             kl_mode (str, optional): KL divergence mode. Options are:
-                - "simple": Uses a simplified penalty based on squared L2 norm of latents.
-                  Faster but less accurate approximation of KL divergence.
-                - "strict": Computes proper KL divergence between latent distribution and N(0,1).
+                - "simple-forward": Uses a simplified penalty based on squared L2 norm of latents.
+                  Fastest but least accurate approximation of KL divergence.
+                - "forward": Computes proper forward KL divergence between latent distribution and N(0,1).
                   More accurate but slightly more computationally expensive.
+                - "symmetric": Computes both forward and backward KL divergence for more robust regularization.
+                  Most accurate but most computationally expensive.
                 Defaults to "simple".
             interp_mode (str, optional): Interpolation mode for resizing.
                 Options include "bilinear", "bicubic", etc. Defaults to "bilinear".
@@ -433,28 +435,31 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             if kl_penalty:
                 # NOTE: Convert to float32 to avoid numerical instability
                 pred_latents_fp32 = pred_latents.to(torch.float32)
-                if kl_mode == "simple":
-                    kl_losses = kl_weight * pred_latents_fp32.square().mean(
+                if kl_mode == "simple-forward":
+                    kl_losses = pred_latents_fp32.square().mean(
                         dim=(1, 2, 3), keepdim=True
                     )
-                elif kl_mode == "strict":
+                elif kl_mode in ["forward", "symmetric"]:
                     # KL divergence between N(mu, sigma^2) and N(0, 1)
-                    # For a multivariate normal distribution
+                    # Forward pass: N(0, 1) -> N(mu, sigma^2)
                     mu = pred_latents_fp32.mean(dim=(1, 2, 3), keepdim=True)
                     var = pred_latents_fp32.var(
                         dim=(1, 2, 3), keepdim=True, unbiased=False
                     )
-                    kl_losses = (
-                        kl_weight
-                        * 0.5
-                        * (mu.square() + var - torch.log(var + EPSILON) - 1)
-                    )
+                    kl_losses = 0.5 * (mu.square() + var - torch.log(var + EPSILON) - 1)
+                    if kl_mode == "symmetric":
+                        # Backward pass: N(mu, sigma^2) -> N(0, 1)
+                        kl_losses += 0.5 * (
+                            (mu.square() + 1) / (var + EPSILON)
+                            + torch.log(var + EPSILON)
+                            - 1
+                        )
                 else:
                     raise ValueError(
                         f"Invalid kl_mode: {kl_mode}. Use 'simple' or 'strict'"
                     )
 
-                losses = losses + kl_losses
+                losses = losses + kl_weight * kl_losses
 
             # Backprop
             losses.backward(torch.ones_like(losses))  # Preserve batch dimension
