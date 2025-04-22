@@ -8,6 +8,7 @@ MARIGOLD_CKPT_ORIGINAL = "prs-eth/marigold-v1-0"
 MARIGOLD_CKPT_LCM = "prs-eth/marigold-lcm-v1-0"
 VAE_CKPT_LIGHT = "madebyollin/taesd"
 SUPPORTED_LOSS_FUNCS = ["l1", "l2", "edge", "smooth"]
+EPSILON = 1e-7
 
 
 def compute_loss(
@@ -197,6 +198,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         beta: float = 0.9,
         kl_penalty: bool = False,
         kl_weight: float = 0.1,
+        kl_mode: str = "simple",
         interp_mode: str = "bilinear",
         loss_funcs: list[str] | None = None,
         seed: int = 2024,
@@ -233,6 +235,12 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 keep prediction latents close to N(0,1). Defaults to False.
             kl_weight (float, optional): Weight for KL divergence penalty.
                 Only used when kl_penalty is True. Defaults to 0.1.
+            kl_mode (str, optional): KL divergence mode. Options are:
+                - "simple": Uses a simplified penalty based on squared L2 norm of latents.
+                  Faster but less accurate approximation of KL divergence.
+                - "strict": Computes proper KL divergence between latent distribution and N(0,1).
+                  More accurate but slightly more computationally expensive.
+                Defaults to "simple".
             interp_mode (str, optional): Interpolation mode for resizing.
                 Options include "bilinear", "bicubic", etc. Defaults to "bilinear".
             loss_funcs (list[str] | None, optional): Loss functions to use.
@@ -423,9 +431,29 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             # NOTE: Add KL divergence penalty to keep
             # the distribution of pred_latent close to N(0,1)
             if kl_penalty:
-                kl_losses = kl_weight * pred_latents.square().mean(
-                    dim=(1, 2, 3), keepdim=True
-                )
+                # NOTE: Convert to float32 to avoid numerical instability
+                pred_latents_fp32 = pred_latents.to(torch.float32)
+                if kl_mode == "simple":
+                    kl_losses = kl_weight * pred_latents_fp32.square().mean(
+                        dim=(1, 2, 3), keepdim=True
+                    )
+                elif kl_mode == "strict":
+                    # KL divergence between N(mu, sigma^2) and N(0, 1)
+                    # For a multivariate normal distribution
+                    mu = pred_latents_fp32.mean(dim=(1, 2, 3), keepdim=True)
+                    var = pred_latents_fp32.var(
+                        dim=(1, 2, 3), keepdim=True, unbiased=False
+                    )
+                    kl_losses = (
+                        kl_weight
+                        * 0.5
+                        * (mu.square() + var - torch.log(var + EPSILON) - 1)
+                    )
+                else:
+                    raise ValueError(
+                        f"Invalid kl_mode: {kl_mode}. Use 'simple' or 'strict'"
+                    )
+
                 losses = losses + kl_losses
 
             # Backprop

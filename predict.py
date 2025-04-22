@@ -195,6 +195,15 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
+    "--kl-mode",
+    type=click.Choice(["simple", "strict"]),
+    default="simple",
+    help="KL divergence mode. "
+    "simple - Uses a simplified penalty based on squared L2 norm of latents. "
+    "strict - Computes proper KL divergence between latent distribution and N(0,1).",
+    show_default=True,
+)
+@click.option(
     "--kl-weight",
     type=click.FloatRange(min=0, min_open=True),
     default=0.1,
@@ -259,6 +268,7 @@ def main(
     batch_size: int,
     kl_penalty: bool,
     kl_weight: float,
+    kl_mode: str,
     use_segmask: bool,
 ) -> None:
     # Set log level
@@ -531,6 +541,7 @@ def main(
                 opt=opt,
                 lr=(lr_latent, lr_scaling),
                 kl_penalty=kl_penalty,
+                kl_mode=kl_mode,
                 kl_weight=kl_weight,
                 beta=beta,
             )
