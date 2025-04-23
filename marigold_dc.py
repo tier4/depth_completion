@@ -420,25 +420,31 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             max_depths = torch.full((N, 1, 1, 1), max_depth, device=sparses.device)
         else:
             raise ValueError(f"Unknown norm method: {norm}")
+
         # Clamp depth values to [min_depth, max_depth]
         if norm in ["minmax", "percentile"]:
             min_depths = torch.clamp(min_depths, min=min_depth, max=max_depth)
             max_depths = torch.clamp(max_depths, min=min_depth, max=max_depth)
-
-        # Normalize sparse depth maps
         sparses_clamped = torch.clamp(
             sparses,
             min=min_depths,
             max=max_depths,
         )
 
-        # Log scale the depth values
+        # Normalize sparse depth maps
+        min_depths_log: torch.Tensor | None = None
+        max_depths_log: torch.Tensor | None = None
+        sparses_clamped_log: torch.Tensor | None = None
         if log_scale:
-            min_depths = torch.log(min_depths)
-            max_depths = torch.log(max_depths)
-            sparses_clamped = torch.log(sparses_clamped)
-        sparses_normed = (sparses_clamped - min_depths) / (max_depths - min_depths)
-        sparses_normed[~masks] = 0  # Set unmeasured regions to 0
+            min_depths_log, max_depths_log = torch.log(min_depths), torch.log(
+                max_depths
+            )
+            sparses_clamped_log = torch.log(sparses_clamped)
+            sparses_normed = (sparses_clamped_log - min_depths_log) / (
+                max_depths_log - min_depths_log
+            )
+        else:
+            sparses_normed = (sparses_clamped - min_depths) / (max_depths - min_depths)
         sparses_min, sparses_max = utils.masked_minmax(
             sparses_normed, masks, dims=(1, 2, 3)
         )
@@ -515,6 +521,17 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 sparse_range=sparse_ranges,
                 interp_mode=interp_mode,
             )  # [N, 1, H, W]
+            denses_normed = denses_normed.clamp(min=0.0, max=1.0)
+            if log_scale:
+                assert min_depths_log is not None and max_depths_log is not None
+                # To metric units
+                denses_normed = denses_normed * (max_depths - min_depths) + min_depths
+                # To normed log scale
+                denses_normed = torch.log(denses_normed)
+                denses_normed = (denses_normed - min_depths_log) / (
+                    max_depths_log - min_depths_log
+                )
+
             losses = compute_loss(
                 denses_normed, sparses_normed, masks, loss_funcs, image=imgs
             )
@@ -599,6 +616,4 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             # Decode
             denses_normed = torch.clamp(denses_normed, min=0, max=1)
             denses = denses_normed * (max_depths - min_depths) + min_depths
-            if log_scale:
-                denses = torch.exp(denses)
         return denses, pred_latents_detached
