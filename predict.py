@@ -66,14 +66,15 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "--depth-range",
+    "--norm",
     type=click.Choice(["const", "minmax", "percentile"]),
     default="const",
-    help="Range of depth values to use for depth completion. "
-    "const - Use constant depth values specified with --min-depth and --max-depth. "
-    "minmax - Use min and max depth values of input sparse depth maps. "
-    "percentile - Use depth values at specified percentiles (e.g., 0.05) "
-    "to exclude outliers.",
+    help="Normalization method for input sparse depth maps. "
+    "const - Normalize with --min-depth and --max-depth. "
+    "minmax - Normalize with min and max depth values of input sparse depth maps. "
+    "percentile - Normalize with depth values at specified percentiles (e.g., 0.05). "
+    "NOTE: even when minmax or percentile, "
+    "depth values are clamped to [--min-depth, --max-depth].",
     show_default=True,
 )
 @click.option(
@@ -286,7 +287,7 @@ def main(
     vae: str,
     steps: int,
     res: int,
-    depth_range: str,
+    norm: str,
     max_depth: float,
     min_depth: float,
     percentile: float,
@@ -574,9 +575,9 @@ def main(
             batch_denses, batch_pred_latents = pipe(
                 batch_imgs,
                 batch_sparses,
-                depth_range=(
-                    (min_depth, max_depth) if depth_range == "const" else depth_range
-                ),
+                max_depth,
+                min_depth=min_depth,
+                norm=norm,
                 percentile=percentile,
                 pred_latents_prev=batch_pred_latents_prev,
                 steps=steps,

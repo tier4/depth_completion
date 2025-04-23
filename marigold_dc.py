@@ -209,7 +209,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         self,
         imgs: torch.Tensor,
         sparses: torch.Tensor,
-        depth_range: tuple[float, float] | str = "minmax",
+        max_depth: float,
+        min_depth: float = 0.0,
+        norm: str = "minmax",
         pred_latents_prev: torch.Tensor | None = None,
         percentile: float = 0.05,
         steps: int = 50,
@@ -238,16 +240,15 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             sparses (torch.Tensor): Batch of sparse depth maps with shape [N, 1, H, W].
                 Should have zeros at missing positions and positive values at measurement points.
                 Raw depth values, not normalized.
-            depth_range (tuple[float, float] | str, optional): Range of depth values to use.
-                If tuple, specifies (min_depth, max_depth) directly.
-                If "minmax", uses min and max values from input sparse depth.
-                If "percentile", uses depth values at specified percentiles to exclude outliers.
-                Defaults to "minmax".
+            max_depth (float): Maximum depth value for normalization.
+            min_depth (float, optional): Minimum depth value for normalization. Defaults to 0.0.
+            norm (str, optional): Normalization method for input sparse depth maps.
+                Options are "const", "minmax", or "percentile". Defaults to "minmax".
             pred_latents_prev (torch.Tensor | None, optional): Previous prediction latents
                 with shape [N, 4, EH, EW] from a prior frame or iteration.
                 Enables temporal consistency when processing video sequences. Defaults to None.
             percentile (float, optional): Percentile value for determining depth range.
-                Only used when depth_range="percentile". Lower values (e.g., 0.05) exclude outliers
+                Only used when norm="percentile". Lower values (e.g., 0.05) exclude outliers
                 by using the 5th and 95th percentiles. Defaults to 0.05.
             steps (int, optional): Number of denoising steps.
                 Higher values give better quality but slower inference. Defaults to 50.
@@ -381,32 +382,33 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
         # Calculate min & max depth values for each sample in the batch
         masks = sparses > 0
-        if isinstance(depth_range, str):
-            if depth_range == "minmax":
-                min_depths, max_depths = utils.masked_minmax(
-                    sparses, masks, dims=(1, 2, 3)
-                )
-                min_depths = min_depths.view(-1, 1, 1, 1)
-                max_depths = max_depths.view(-1, 1, 1, 1)
-            elif depth_range == "percentile":
-                ranges = torch.stack(
-                    [
-                        torch.quantile(
-                            s[m],
-                            torch.tensor(
-                                [percentile, 1 - percentile], device=sparses.device
-                            ),
-                        )
-                        for s, m in zip(sparses, masks, strict=True)
-                    ]
-                )  # [N, 2]
-                min_depths = ranges[:, 0].view(-1, 1, 1, 1)
-                max_depths = ranges[:, 1].view(-1, 1, 1, 1)
-            else:
-                raise ValueError(f"Unknown depth_range: {depth_range}")
+        if norm == "minmax":
+            min_depths, max_depths = utils.masked_minmax(sparses, masks, dims=(1, 2, 3))
+            min_depths = min_depths.view(-1, 1, 1, 1)
+            max_depths = max_depths.view(-1, 1, 1, 1)
+        elif norm == "percentile":
+            ranges = torch.stack(
+                [
+                    torch.quantile(
+                        s[m],
+                        torch.tensor(
+                            [percentile, 1 - percentile], device=sparses.device
+                        ),
+                    )
+                    for s, m in zip(sparses, masks, strict=True)
+                ]
+            )  # [N, 2]
+            min_depths = ranges[:, 0].view(-1, 1, 1, 1)
+            max_depths = ranges[:, 1].view(-1, 1, 1, 1)
+        elif norm == "const":
+            min_depths = torch.full((N, 1, 1, 1), min_depth, device=sparses.device)
+            max_depths = torch.full((N, 1, 1, 1), max_depth, device=sparses.device)
         else:
-            min_depths = torch.full((N, 1, 1, 1), depth_range[0], device=sparses.device)
-            max_depths = torch.full((N, 1, 1, 1), depth_range[1], device=sparses.device)
+            raise ValueError(f"Unknown norm method: {norm}")
+        # Clamp depth values to [min_depth, max_depth]
+        if norm in ["minmax", "percentile"]:
+            min_depths = torch.clamp(min_depths, min=min_depth, max=max_depth)
+            max_depths = torch.clamp(max_depths, min=min_depth, max=max_depth)
 
         # Normalize sparse depth maps
         sparses_clamped = torch.clamp(sparses, min=min_depths, max=max_depths)
