@@ -18,6 +18,7 @@ EPSILON = 1e-7
 def compute_loss(
     dense: torch.Tensor,
     sparse: torch.Tensor,
+    mask: torch.Tensor,
     loss_funcs: list[str],
     image: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -27,6 +28,7 @@ def compute_loss(
     Args:
         dense: Predicted dense depth map tensor of shape [N, 1, H, W].
         sparse: Sparse depth measurements tensor of shape [N, 1, H, W], with zeros at unmeasured points.
+        mask: Binary mask tensor of shape [N, 1, H, W] indicating valid sparse depth measurements.
         loss_funcs: List of loss function names to apply. Supported values are:
                     - "l1": L1 loss between dense and sparse at measured points
                     - "l2": L2 loss between dense and sparse at measured points
@@ -45,22 +47,21 @@ def compute_loss(
     if len(loss_funcs) == 0:
         raise ValueError("loss_funcs must contain at least one loss function")
     total = torch.zeros(dense.shape[0], device=dense.device)  # [N]
-    sparse_mask = sparse > 0
 
     for loss_func in loss_funcs:
         if loss_func == "l1":
             # Compute L1 loss per sample using masked operations
             l1_loss = torch.abs(dense - sparse)
-            l1_loss = l1_loss * sparse_mask  # Apply mask
+            l1_loss = l1_loss * mask  # Apply mask
             # Sum over HW dimensions and divide by number of valid points per sample
-            total += l1_loss.sum(dim=(1, 2, 3)) / sparse_mask.sum(dim=(1, 2, 3))
+            total += l1_loss.sum(dim=(1, 2, 3)) / mask.sum(dim=(1, 2, 3))
 
         elif loss_func == "l2":
             # Compute L2 loss per sample using masked operations
             l2_loss = (dense - sparse) ** 2
-            l2_loss = l2_loss * sparse_mask  # Apply mask
+            l2_loss = l2_loss * mask  # Apply mask
             # Sum over HW dimensions and divide by number of valid points per sample
-            total += l2_loss.sum(dim=(1, 2, 3)) / sparse_mask.sum(dim=(1, 2, 3))
+            total += l2_loss.sum(dim=(1, 2, 3)) / mask.sum(dim=(1, 2, 3))
 
         elif loss_func == "edge":
             if image is None:
@@ -225,6 +226,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         kl_mode: str = "simple-forward",
         interp_mode: str = "bilinear",
         loss_funcs: list[str] | None = None,
+        log_scale: bool = False,
         seed: int = 2024,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -284,6 +286,10 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 If None, defaults to ["l1", "l2"]. Supported options are
                 "l1", "l2", "edge", and "smooth". When using "edge" or "smooth",
                 the RGB image is used to guide depth discontinuities. Defaults to None.
+            log_scale (bool, optional): Whether to use logarithmic scale for depth values.
+                When True, depth values are transformed using natural logarithm before processing
+                and exponentiated after processing. This can improve depth estimation for scenes
+                with large depth ranges. Requires min_depth > 0. Defaults to False.
             seed (int, optional): Random seed for reproducibility. Defaults to 2024.
 
         Returns:
@@ -330,8 +336,17 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     "Shape of pred_latents_prev must be [N, 4, EH, EW], but got "
                     f"{pred_latents_prev.shape}"
                 )
+
+        # Check if beta is in (0, 1)
         if beta < 0 or beta > 1:
             raise ValueError(f"beta must be in [0, 1], but got {beta}")
+
+        # Check if min_depth > 0 when log_scale is True
+        if log_scale and min_depth <= EPSILON:
+            raise ValueError(
+                f"min_depth must be > {EPSILON} when "
+                f"log_scale is True, but got {min_depth}"
+            )
 
         # Set learning rates
         if lr is None:
@@ -411,7 +426,17 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             max_depths = torch.clamp(max_depths, min=min_depth, max=max_depth)
 
         # Normalize sparse depth maps
-        sparses_clamped = torch.clamp(sparses, min=min_depths, max=max_depths)
+        sparses_clamped = torch.clamp(
+            sparses,
+            min=min_depths,
+            max=max_depths,
+        )
+
+        # Log scale the depth values
+        if log_scale:
+            min_depths = torch.log(min_depths)
+            max_depths = torch.log(max_depths)
+            sparses_clamped = torch.log(sparses_clamped)
         sparses_normed = (sparses_clamped - min_depths) / (max_depths - min_depths)
         sparses_normed[~masks] = 0  # Set unmeasured regions to 0
         sparses_min, sparses_max = utils.masked_minmax(
@@ -490,7 +515,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 sparse_range=sparse_ranges,
                 interp_mode=interp_mode,
             )  # [N, 1, H, W]
-            losses = compute_loss(denses_normed, sparses_normed, loss_funcs, image=imgs)
+            losses = compute_loss(
+                denses_normed, sparses_normed, masks, loss_funcs, image=imgs
+            )
 
             # NOTE: Add KL divergence penalty to keep
             # the distribution of pred_latent close to N(0,1)
@@ -572,4 +599,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             # Decode
             denses_normed = torch.clamp(denses_normed, min=0, max=1)
             denses = denses_normed * (max_depths - min_depths) + min_depths
+            if log_scale:
+                denses = torch.exp(denses)
         return denses, pred_latents_detached
