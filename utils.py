@@ -24,6 +24,52 @@ RESULT_DIR_NAME_DENSE = "dense"
 RESULT_DIR_NAME_VIS = "vis"
 
 
+def masked_minmax(
+    x: torch.Tensor, mask: torch.Tensor, dims: tuple[int, ...]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Calculate the minimum and maximum values of tensor x along specified dimensions, but only considering values where mask is True.
+
+    Args:
+        x (torch.Tensor): Input tensor
+        mask (torch.Tensor): Boolean mask tensor with the same shape as x
+        dims (tuple[int, ...]): Dimensions along which to compute the minimum and maximum
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: Tuple containing (min, max) tensors along specified dimensions where mask is True
+
+    Raises:
+        ValueError: If x and mask have different shapes
+    """  # noqa: E501
+    if x.shape != mask.shape:
+        raise ValueError(
+            f"Shape of x {x.shape} must be equal to shape of mask {mask.shape}"
+        )
+
+    # Set masked-out values for minimum calculation
+    masked_x_min = torch.where(
+        mask, x, torch.tensor(float("inf"), device=x.device, dtype=x.dtype)
+    )
+
+    # Set masked-out values for maximum calculation
+    masked_x_max = torch.where(
+        mask, x, torch.tensor(float("-inf"), device=x.device, dtype=x.dtype)
+    )
+
+    # Compute minimum and maximum along specified dimensions
+    min_vals = torch.amin(masked_x_min, dim=dims)
+    max_vals = torch.amax(masked_x_max, dim=dims)
+
+    # Check if any value in the results is infinity
+    # (meaning no valid values in mask for that position)
+    if torch.isinf(min_vals).any() or torch.isinf(max_vals).any():
+        raise ValueError(
+            "No valid values found in mask for some positions. "
+            "Ensure that mask has at least one True value along the specified dimensions."
+        )
+
+    return min_vals, max_vals
+
+
 def filterout(li: list[Any], flags: list[bool]) -> list[Any]:
     """Filter elements in `li` based on corresponding boolean flags.
 
@@ -294,7 +340,9 @@ def visualize_depth(
         )
 
     # Normalize depth maps to [0, 1]
+    depth_maps = depth_maps.clamp(min=min_depth, max=max_depth)
     depth_maps = (depth_maps - min_depth) / (max_depth - min_depth)
+    depth_maps = depth_maps.clamp(min=0.0, max=1.0)
 
     # Visualize each depth map and stack results
     visualized = torch.stack(

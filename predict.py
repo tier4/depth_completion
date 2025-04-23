@@ -66,10 +66,37 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
+    "--depth-range",
+    type=click.Choice(["const", "minmax", "percentile"]),
+    default="const",
+    help="Range of depth values to use for depth completion. "
+    "const - Use constant depth values specified with --min-depth and --max-depth. "
+    "minmax - Use min and max depth values of input sparse depth maps. "
+    "percentile - Use depth values at specified percentiles (e.g., 0.05) "
+    "to exclude outliers.",
+    show_default=True,
+)
+@click.option(
+    "--percentile",
+    type=click.FloatRange(min=0, max=1),
+    default=0.05,
+    help="Percentile value for determining depth range from input sparse depth maps. "
+    "Lower values (e.g., 0.05) exclude outliers by using the 5th and 95th percentiles. "
+    "Only used when --depth-range=percentile.",
+    show_default=True,
+)
+@click.option(
     "--max-depth",
     type=click.FloatRange(min=0, min_open=True),
     default=120.0,
     help="Max absolute distance [m] of input sparse depth maps.",
+    show_default=True,
+)
+@click.option(
+    "--min-depth",
+    type=click.FloatRange(min=0),
+    default=0.0,
+    help="Min absolute distance [m] of input sparse depth maps.",
     show_default=True,
 )
 @click.option(
@@ -259,7 +286,10 @@ def main(
     vae: str,
     steps: int,
     res: int,
+    depth_range: str,
     max_depth: float,
+    min_depth: float,
+    percentile: float,
     save_dense: bool,
     vis: bool,
     vis_res: tuple[int, int],
@@ -544,7 +574,10 @@ def main(
             batch_denses, batch_pred_latents = pipe(
                 batch_imgs,
                 batch_sparses,
-                max_depth,
+                depth_range=(
+                    (min_depth, max_depth) if depth_range == "const" else depth_range
+                ),
+                percentile=percentile,
                 pred_latents_prev=batch_pred_latents_prev,
                 steps=steps,
                 resolution=res,
@@ -600,9 +633,7 @@ def main(
                 if vis:
                     # Create grid image of visualization of inputs and outputs
                     stime_vis = time.time()
-                    sparse_mask = (sparse <= 0.0).repeat(
-                        img.shape[0], 1, 1
-                    )  # [C, H, W]
+                    mask = (sparse <= 0.0).repeat(img.shape[0], 1, 1)  # [C, H, W]
                     to_vis: list[torch.Tensor] = []
                     for order in vis_order:
                         if order == "image":
@@ -610,13 +641,15 @@ def main(
                         elif order == "sparse":
                             sparse_vis = utils.visualize_depth(
                                 sparse[torch.newaxis],
+                                min_depth=min_depth,
                                 max_depth=max_depth,
                             ).squeeze(0)
-                            sparse_vis[sparse_mask] = 0
+                            sparse_vis[mask] = 0
                             to_vis.append(sparse_vis)
                         elif order == "dense":
                             dense_vis = utils.visualize_depth(
                                 dense[torch.newaxis],
+                                min_depth=min_depth,
                                 max_depth=max_depth,
                             ).squeeze(0)
                             to_vis.append(dense_vis)

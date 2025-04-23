@@ -4,6 +4,8 @@ import diffusers
 import torch
 from diffusers import MarigoldDepthPipeline
 
+import utils
+
 diffusers.utils.logging.disable_progress_bar()
 
 MARIGOLD_CKPT_ORIGINAL = "prs-eth/marigold-v1-0"
@@ -207,8 +209,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         self,
         imgs: torch.Tensor,
         sparses: torch.Tensor,
-        max_depth: float,
+        depth_range: tuple[float, float] | str = "minmax",
         pred_latents_prev: torch.Tensor | None = None,
+        percentile: float = 0.05,
         steps: int = 50,
         resolution: int = 768,
         affine_invariant: bool = True,
@@ -235,11 +238,17 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             sparses (torch.Tensor): Batch of sparse depth maps with shape [N, 1, H, W].
                 Should have zeros at missing positions and positive values at measurement points.
                 Raw depth values, not normalized.
-            max_depth (float): Maximum depth value for normalization.
-                Used to normalize depth values to [0, 1] range.
+            depth_range (tuple[float, float] | str, optional): Range of depth values to use.
+                If tuple, specifies (min_depth, max_depth) directly.
+                If "minmax", uses min and max values from input sparse depth.
+                If "percentile", uses depth values at specified percentiles to exclude outliers.
+                Defaults to "minmax".
             pred_latents_prev (torch.Tensor | None, optional): Previous prediction latents
                 with shape [N, 4, EH, EW] from a prior frame or iteration.
                 Enables temporal consistency when processing video sequences. Defaults to None.
+            percentile (float, optional): Percentile value for determining depth range.
+                Only used when depth_range="percentile". Lower values (e.g., 0.05) exclude outliers
+                by using the 5th and 95th percentiles. Defaults to 0.05.
             steps (int, optional): Number of denoising steps.
                 Higher values give better quality but slower inference. Defaults to 50.
             resolution (int, optional): Resolution for internal processing.
@@ -272,7 +281,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 Options include "bilinear", "bicubic", etc. Defaults to "bilinear".
             loss_funcs (list[str] | None, optional): Loss functions to use.
                 If None, defaults to ["l1", "l2"]. Supported options are
-                "l1", "l2", "edge", and "smooth".
+                "l1", "l2", "edge", and "smooth". When using "edge" or "smooth",
+                the RGB image is used to guide depth discontinuities. Defaults to None.
             seed (int, optional): Random seed for reproducibility. Defaults to 2024.
 
         Returns:
@@ -369,26 +379,46 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             else:
                 pred_latents = pred_latents_common
 
-        # Normalize sparse depth map
+        # Calculate min & max depth values for each sample in the batch
         masks = sparses > 0
-        sparses_normed = torch.clamp(sparses, min=0, max=max_depth) / max_depth
+        if isinstance(depth_range, str):
+            if depth_range == "minmax":
+                min_depths, max_depths = utils.masked_minmax(
+                    sparses, masks, dims=(1, 2, 3)
+                )
+                min_depths = min_depths.view(-1, 1, 1, 1)
+                max_depths = max_depths.view(-1, 1, 1, 1)
+            elif depth_range == "percentile":
+                ranges = torch.stack(
+                    [
+                        torch.quantile(
+                            s[m],
+                            torch.tensor(
+                                [percentile, 1 - percentile], device=sparses.device
+                            ),
+                        )
+                        for s, m in zip(sparses, masks, strict=True)
+                    ]
+                )  # [N, 2]
+                min_depths = ranges[:, 0].view(-1, 1, 1, 1)
+                max_depths = ranges[:, 1].view(-1, 1, 1, 1)
+            else:
+                raise ValueError(f"Unknown depth_range: {depth_range}")
+        else:
+            min_depths = torch.full((N, 1, 1, 1), depth_range[0], device=sparses.device)
+            max_depths = torch.full((N, 1, 1, 1), depth_range[1], device=sparses.device)
+
+        # Normalize sparse depth maps
+        sparses_clamped = torch.clamp(sparses, min=min_depths, max=max_depths)
+        sparses_normed = (sparses_clamped - min_depths) / (max_depths - min_depths)
+        sparses_normed[~masks] = 0  # Set unmeasured regions to 0
+        sparses_min, sparses_max = utils.masked_minmax(
+            sparses_normed, masks, dims=(1, 2, 3)
+        )
+        sparse_ranges = (sparses_min, sparses_max) if affine_invariant else None
 
         # Set current prediction latents as trainable params
         pred_latents = torch.nn.Parameter(pred_latents)  # [N, 4, EH, EW]
-
-        # Calculate min, max, and range for each sample in the batch [N] -> [N,1,1,1]
-        sparse_ranges = (
-            (
-                torch.stack(  # min
-                    [s[m].min() for s, m in zip(sparses_normed, masks, strict=True)]
-                ).view(-1, 1, 1, 1),
-                torch.stack(  # max
-                    [s[m].max() for s, m in zip(sparses_normed, masks, strict=True)]
-                ).view(-1, 1, 1, 1),
-            )
-            if affine_invariant
-            else None
-        )
 
         # Set scaling params
         affine_params = (
@@ -508,7 +538,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
                 # Calculate scaling factor per sample
                 factors = pred_epsilon_norms / torch.clamp(
-                    pred_latent_grad_norms, min=1e-8
+                    pred_latent_grad_norms, min=EPSILON
                 )  # [N]
                 # Reshape scaling factor for broadcasting
                 factors = factors.view(N, 1, 1, 1)  # [N, 1, 1, 1]
@@ -538,9 +568,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 interp_mode=interp_mode,
             )  # [N, 1, H, W]
             # Decode
-            denses = torch.clamp(
-                denses_normed * max_depth,
-                min=0,
-                max=max_depth,
-            )
+            denses_normed = torch.clamp(denses_normed, min=0, max=1)
+            denses = denses_normed * (max_depths - min_depths) + min_depths
         return denses, pred_latents_detached
