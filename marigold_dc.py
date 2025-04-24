@@ -3,7 +3,7 @@ from typing import cast
 import diffusers
 import torch
 from diffusers import MarigoldDepthPipeline
-from torch.optim import SGD, Adagrad, Adam, Optimizer
+from torch.optim import SGD, Adadelta, Adagrad, Adam, Optimizer
 
 import utils
 
@@ -263,7 +263,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 This allows the model to work with different depth sensors and units without retraining.
                 The model will automatically estimate the appropriate scale and shift parameters
                 to align its predictions with the input sparse measurements. Defaults to True.
-            opt (str, optional): Optimizer to use ("adam", "sgd", or "adagrad"). Defaults to "adam".
+            opt (str, optional): Optimizer to use ("adam", "sgd", "adadelta", or "adagrad"). Defaults to "adam".
+                Note that when opt="adadelta", the learning rate is fixed to 1.0 regardless of the lr parameter.
             lr (tuple[float, float] | None, optional): Learning rates for (latent, scaling).
                 If None, defaults to (0.05, 0.005).
             beta (float, optional): Momentum factor for prediction latents between frames.
@@ -481,6 +482,11 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             optimizer = SGD(param_groups)
         elif opt == "adagrad":
             optimizer = Adagrad(param_groups)
+        elif opt == "adadelta":
+            # NOTE: Adadelta uses a fixed learning rate of 1
+            for group in param_groups:
+                group["lr"] = 1
+            optimizer = Adadelta(param_groups)
         else:
             raise ValueError(f"Unknown optimizer: {opt}")
 

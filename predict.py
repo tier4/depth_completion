@@ -195,9 +195,15 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 )
 @click.option(
     "--opt",
-    type=click.Choice(["adam", "sgd", "adagrad"]),
+    type=click.Choice(["adam", "sgd", "adagrad", "adadelta"]),
     default="adam",
-    help="Optimizer to use for depth completion.",
+    help="Optimizer to use for depth completion. "
+    "adam - Adam optimizer. "
+    "sgd - Stochastic gradient descent optimizer. "
+    "adagrad - Adagrad optimizer. "
+    "adadelta - Adadelta optimizer optimizer. "
+    "NOTE: when using adadelta, the learning rate is fixed to 1.0 "
+    "regardless of the lr parameter.",
     show_default=True,
 )
 @click.option(
