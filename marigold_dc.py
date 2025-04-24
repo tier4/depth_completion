@@ -449,6 +449,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         sparses_min, sparses_max = utils.masked_minmax(
             sparses_normed, masks, dims=(1, 2, 3)
         )
+        sparses_min = sparses_min.view(-1, 1, 1, 1)
+        sparses_max = sparses_max.view(-1, 1, 1, 1)
         sparse_ranges = (sparses_min, sparses_max) if affine_invariant else None
 
         # Set current prediction latents as trainable params
