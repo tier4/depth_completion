@@ -195,7 +195,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 )
 @click.option(
     "--opt",
-    type=click.Choice(["adam", "sgd"]),
+    type=click.Choice(["adam", "sgd", "adagrad"]),
     default="adam",
     help="Optimizer to use for depth completion.",
     show_default=True,
