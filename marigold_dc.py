@@ -267,7 +267,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             opt (str, optional): Optimizer to use ("adam", "sgd", "adadelta", or "adagrad"). Defaults to "adam".
                 Note that when opt="adadelta", the learning rate is fixed to 1.0 regardless of the lr parameter.
             lr (tuple[float, float] | None, optional): Learning rates for (latent, scaling).
-                If None, defaults to (0.05, 0.005).
+                If None, defaults to (0.05, 0.005). For "adadelta" optimizer, this parameter is ignored.
             beta (float, optional): Momentum factor for prediction latents between frames.
                 Must be in range [0, 1]. Higher values give more weight to new latents,
                 while lower values preserve more information from previous frames. Defaults to 0.9.
@@ -588,28 +588,23 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             # Backprop
             losses.backward(torch.ones_like(losses))  # Preserve batch dimension
 
-            # Scale gradients up
+            # NOTE: Scale grads of pred_latents by the norm of pred_epsilons
+            # for stable optimization
             if scale_grad_by_noise:
                 with torch.no_grad():
                     assert pred_latents.grad is not None
                     assert pred_epsilons is not None
-
-                    # Calculate norms per sample in the batch
                     pred_epsilon_norms = torch.linalg.norm(
                         pred_epsilons.view(N, -1), dim=1
                     )  # [N]
                     pred_latent_grad_norms = torch.linalg.norm(
                         pred_latents.grad.view(N, -1), dim=1
                     )  # [N]
-
-                    # Calculate scaling factor per sample
                     factors = pred_epsilon_norms / torch.clamp(
                         pred_latent_grad_norms, min=EPSILON
                     )  # [N]
-                    # Reshape scaling factor for broadcasting
                     factors = factors.view(N, 1, 1, 1)  # [N, 1, 1, 1]
-
-                    # Apply per-sample scaling
+                    # Scaling
                     pred_latents.grad *= factors  # [N, 4, EH, EW]
 
             # Backprop
