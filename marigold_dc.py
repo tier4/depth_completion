@@ -3,7 +3,10 @@ from typing import cast
 import diffusers
 import torch
 from diffusers import MarigoldDepthPipeline
+from diffusers.models import AutoencoderKL, UNet2DConditionModel
+from diffusers.schedulers import DDIMScheduler, LCMScheduler
 from torch.optim import SGD, Adadelta, Adagrad, Adam, Optimizer
+from transformers import CLIPTextModel, CLIPTokenizer
 
 import utils
 
@@ -121,6 +124,33 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
     Supports batch processing with optional temporal consistency.
     """  # noqa: E501
 
+    def __init__(
+        self,
+        unet: UNet2DConditionModel,
+        vae: AutoencoderKL,
+        scheduler: DDIMScheduler | LCMScheduler,
+        text_encoder: CLIPTextModel,
+        tokenizer: CLIPTokenizer,
+        prediction_type: str | None = None,
+        scale_invariant: bool | None = True,
+        shift_invariant: bool | None = True,
+        default_denoising_steps: int | None = None,
+        default_processing_resolution: int | None = None,
+    ) -> None:
+        super().__init__(
+            unet,
+            vae,
+            scheduler,
+            text_encoder,
+            tokenizer,
+            prediction_type,
+            scale_invariant,
+            shift_invariant,
+            default_denoising_steps,
+            default_processing_resolution,
+        )
+        self.pred_latents_ema: torch.Tensor | None = None
+
     def _affine_to_metric(
         self,
         dense: torch.Tensor,  # [N, 1, H, W]
@@ -214,14 +244,16 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         max_depth: float,
         min_depth: float = 0.0,
         norm: str = "minmax",
-        pred_latents_prev: torch.Tensor | None = None,
         percentile: float = 0.05,
+        pred_latents_prev: torch.Tensor | None = None,
+        beta: float = 0.9,
+        ema: bool = False,
+        alpha: float = 0.9,
         steps: int = 50,
         resolution: int = 768,
         affine_invariant: bool = True,
         opt: str = "adam",
         lr: tuple[float, float] | None = None,
-        beta: float = 0.9,
         kl_penalty: bool = False,
         kl_weight: float = 0.1,
         kl_mode: str = "simple-forward",
@@ -248,12 +280,19 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             min_depth (float, optional): Minimum depth value for normalization. Defaults to 0.0.
             norm (str, optional): Normalization method for input sparse depth maps.
                 Options are "const", "minmax", or "percentile". Defaults to "minmax".
-            pred_latents_prev (torch.Tensor | None, optional): Previous prediction latents
-                with shape [N, 4, EH, EW] from a prior frame or iteration.
-                Enables temporal consistency when processing video sequences. Defaults to None.
             percentile (float, optional): Percentile value for determining depth range.
                 Only used when norm="percentile". Lower values (e.g., 0.05) exclude outliers
                 by using the 5th and 95th percentiles. Defaults to 0.05.
+            pred_latents_prev (torch.Tensor | None, optional): Previous prediction latents
+                with shape [N, 4, EH, EW] from a prior frame or iteration.
+                Enables temporal consistency when processing video sequences. Defaults to None.
+            beta (float, optional): Momentum factor for prediction latents between frames.
+                Must be in range [0, 1]. Higher values give more weight to new latents,
+                while lower values preserve more information from previous frames. Defaults to 0.9.
+            ema (bool, optional): Whether to use exponential moving average for temporal consistency.
+                When True, uses EMA with alpha parameter for smoother transitions. Defaults to False.
+            alpha (float, optional): EMA coefficient when ema=True. Controls the weight of previous
+                predictions in the moving average. Must be in range [0, 1]. Defaults to 0.9.
             steps (int, optional): Number of denoising steps.
                 Higher values give better quality but slower inference. Defaults to 50.
             resolution (int, optional): Resolution for internal processing.
@@ -268,9 +307,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 Note that when opt="adadelta", the learning rate is fixed to 1.0 regardless of the lr parameter.
             lr (tuple[float, float] | None, optional): Learning rates for (latent, scaling).
                 If None, defaults to (0.05, 0.005). For "adadelta" optimizer, this parameter is ignored.
-            beta (float, optional): Momentum factor for prediction latents between frames.
-                Must be in range [0, 1]. Higher values give more weight to new latents,
-                while lower values preserve more information from previous frames. Defaults to 0.9.
             kl_penalty (bool, optional): Whether to apply KL divergence penalty to
                 keep prediction latents close to N(0,1). Defaults to False.
             kl_weight (float, optional): Weight for KL divergence penalty.
@@ -317,9 +353,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     truncation=True,
                     return_tensors="pt",
                 )
-                text_input_ids = text_inputs.input_ids.to(self.device)
                 self.empty_text_embedding: torch.Tensor = self.text_encoder(
-                    text_input_ids
+                    text_inputs.input_ids.to(self.device)
                 )[0]
 
         # Check input shapes
@@ -396,9 +431,18 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 imgs_resized, None, generator, 1, N
             )  # [N, 4, EH, EW], [N, 4, EH, EW]
             if pred_latents_prev is not None:
-                pred_latents = (
-                    beta * pred_latents_common + (1 - beta) * pred_latents_prev
-                )
+                if ema:
+                    if self.pred_latents_ema is None:
+                        self.pred_latents_ema = pred_latents = pred_latents_common
+                    else:
+                        self.pred_latents_ema = pred_latents = (
+                            self.pred_latents_ema * alpha
+                            + (1 - alpha) * pred_latents_prev
+                        )
+                else:
+                    pred_latents = (
+                        beta * pred_latents_common + (1 - beta) * pred_latents_prev
+                    )
             else:
                 pred_latents = pred_latents_common
 

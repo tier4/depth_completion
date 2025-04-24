@@ -264,12 +264,27 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
+    "--ema",
+    type=bool,
+    default=False,
+    help="Whether to use exponential moving average for temporal consistency. "
+    "Only used when --use-prev-latent=True.",
+    show_default=True,
+)
+@click.option(
+    "--alpha",
+    type=click.FloatRange(min=0, max=1),
+    default=0.9,
+    help="EMA coefficient when ema=True. Controls the weight of previous "
+    "predictions in the moving average. Used when --use-prev-latent=True.",
+    show_default=True,
+)
+@click.option(
     "--beta",
     type=click.FloatRange(min=0, min_open=True),
     default=0.9,
-    help="Weight for the latent consistency term. "
-    "Higher values give more weight to new latents, "
-    "while lower values preserve more information from previous frames.",
+    help="Weight for the latent consistency term when --ema=False. "
+    "Only used when --use-prev-latent=True",
     show_default=True,
 )
 @click.option(
@@ -326,6 +341,8 @@ def main(
     lr_latent: float,
     lr_scaling: float,
     use_prev_latent: bool,
+    ema: bool,
+    alpha: float,
     beta: float,
     batch_size: int,
     kl_penalty: bool,
@@ -524,6 +541,7 @@ def main(
         )
         postfix: dict[str, Any] = {}
         batch_pred_latents_prev: torch.Tensor | None = None
+        pipe.pred_latents_ema = None
         for i in range(0, len(img_paths), batch_size):
             batch_img_paths = img_paths[i : i + batch_size]
             batch_sparse_paths = sparse_paths[i : i + batch_size]
@@ -602,6 +620,9 @@ def main(
                 norm=norm,
                 percentile=percentile,
                 pred_latents_prev=batch_pred_latents_prev,
+                ema=ema,
+                alpha=alpha,
+                beta=beta,
                 steps=steps,
                 resolution=res,
                 interp_mode=interp_mode,
@@ -611,7 +632,6 @@ def main(
                 kl_penalty=kl_penalty,
                 kl_mode=kl_mode,
                 kl_weight=kl_weight,
-                beta=beta,
                 affine_invariant=affine_invariant,
                 log_scale=log_scale,
                 scale_grad_by_noise=scale_grad_by_noise,
