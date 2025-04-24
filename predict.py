@@ -293,6 +293,13 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     help="Whether to log scale the depth values.",
     show_default=True,
 )
+@click.option(
+    "--scale-grad-by-noise",
+    type=bool,
+    default=True,
+    help="Whether to scale the gradient by the noise.",
+    show_default=True,
+)
 def main(
     src_root: Path,
     dst_root: Path,
@@ -327,6 +334,7 @@ def main(
     use_segmask: bool,
     affine_invariant: bool,
     log_scale: bool,
+    scale_grad_by_noise: bool,
 ) -> None:
     # Set log level
     logger.remove()
@@ -606,6 +614,7 @@ def main(
                 beta=beta,
                 affine_invariant=affine_invariant,
                 log_scale=log_scale,
+                scale_grad_by_noise=scale_grad_by_noise,
             )
             batch_denses = cast(torch.Tensor, batch_denses)
             batch_pred_latents = cast(torch.Tensor, batch_pred_latents)

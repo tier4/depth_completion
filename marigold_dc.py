@@ -228,6 +228,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         interp_mode: str = "bilinear",
         loss_funcs: list[str] | None = None,
         log_scale: bool = False,
+        scale_grad_by_noise: bool = True,
         seed: int = 2024,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -292,7 +293,11 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 When True, depth values are transformed using natural logarithm before processing
                 and exponentiated after processing. This can improve depth estimation for scenes
                 with large depth ranges. Requires min_depth > 0. Defaults to False.
-            seed (int, optional): Random seed for reproducibility. Defaults to 2024.
+            scale_grad_by_noise (bool, optional): Whether to scale gradients by the norm of predicted noise.
+                When True, gradients are scaled up to prevent vanishing gradients caused by miscalibrated
+                noise predictions. This typically improves convergence and final results. Defaults to True.
+            seed (int, optional): Random seed for initializing the diffusion process generator and reproducibility.
+                Defaults to 2024.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor]:
@@ -497,7 +502,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
             # Forward pass through the U-Net
             latents = torch.cat([img_latents, pred_latents], dim=1)  # [N, 8, EH, EW]
-            pred_noises = self.unet(
+            pred_noises: torch.Tensor = self.unet(
                 latents,
                 t,
                 encoder_hidden_states=batch_empty_text_embedding,
@@ -506,13 +511,15 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 0
             ]  # [N, 4, EH, EW]
 
-            # Compute pred_epsilon to later rescale the depth latent gradient
-            with torch.no_grad():
-                a_prod_t = self.scheduler.alphas_cumprod[t]
-                b_prod_t = 1 - a_prod_t
-                pred_epsilons = (a_prod_t**0.5) * pred_noises + (
-                    b_prod_t**0.5
-                ) * pred_latents  # [N, 4, EH, EW]
+            # Compute noise to later rescale the depth latent gradient
+            pred_epsilons: torch.Tensor | None = None
+            if scale_grad_by_noise:
+                with torch.no_grad():
+                    a_prod_t = cast(float, self.scheduler.alphas_cumprod[t])
+                    b_prod_t = 1 - a_prod_t
+                    pred_epsilons = (a_prod_t**0.5) * pred_noises + (
+                        b_prod_t**0.5
+                    ) * pred_latents  # [N, 4, EH, EW]
 
             # Preview the final output depth with Tweedie's formula
             previews = cast(
@@ -582,26 +589,28 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             losses.backward(torch.ones_like(losses))  # Preserve batch dimension
 
             # Scale gradients up
-            with torch.no_grad():
-                assert pred_latents.grad is not None
+            if scale_grad_by_noise:
+                with torch.no_grad():
+                    assert pred_latents.grad is not None
+                    assert pred_epsilons is not None
 
-                # Calculate norms per sample in the batch
-                pred_epsilon_norms = torch.linalg.norm(
-                    pred_epsilons.view(N, -1), dim=1
-                )  # [N]
-                pred_latent_grad_norms = torch.linalg.norm(
-                    pred_latents.grad.view(N, -1), dim=1
-                )  # [N]
+                    # Calculate norms per sample in the batch
+                    pred_epsilon_norms = torch.linalg.norm(
+                        pred_epsilons.view(N, -1), dim=1
+                    )  # [N]
+                    pred_latent_grad_norms = torch.linalg.norm(
+                        pred_latents.grad.view(N, -1), dim=1
+                    )  # [N]
 
-                # Calculate scaling factor per sample
-                factors = pred_epsilon_norms / torch.clamp(
-                    pred_latent_grad_norms, min=EPSILON
-                )  # [N]
-                # Reshape scaling factor for broadcasting
-                factors = factors.view(N, 1, 1, 1)  # [N, 1, 1, 1]
+                    # Calculate scaling factor per sample
+                    factors = pred_epsilon_norms / torch.clamp(
+                        pred_latent_grad_norms, min=EPSILON
+                    )  # [N]
+                    # Reshape scaling factor for broadcasting
+                    factors = factors.view(N, 1, 1, 1)  # [N, 1, 1, 1]
 
-                # Apply per-sample scaling
-                pred_latents.grad *= factors  # [N, 4, EH, EW]
+                    # Apply per-sample scaling
+                    pred_latents.grad *= factors  # [N, 4, EH, EW]
 
             # Backprop
             optimizer.step()
