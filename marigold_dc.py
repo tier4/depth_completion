@@ -1,4 +1,4 @@
-from typing import cast
+from typing import Callable, cast
 
 import diffusers
 import torch
@@ -17,6 +17,34 @@ MARIGOLD_CKPT_LCM = "prs-eth/marigold-lcm-v1-0"
 VAE_CKPT_LIGHT = "madebyollin/taesd"
 SUPPORTED_LOSS_FUNCS = ["l1", "l2", "edge", "smooth"]
 EPSILON = 1e-7
+
+
+def get_projection_fn(projection: str) -> Callable[[torch.Tensor], torch.Tensor]:
+    """
+    Returns the appropriate logarithmic function based on the specified projection method.
+
+    This function is used to transform depth values into logarithmic space, which can
+    improve accuracy for scenes with large depth ranges by giving more precision to
+    closer objects and less precision to distant objects.
+
+    Args:
+        projection (str): The projection method to use. Supported values are:
+            - "log": Natural logarithm (base e)
+            - "log10": Base-10 logarithm
+            - "linear": Identity function (no logarithmic transformation)
+
+    Returns:
+        Callable[[torch.Tensor], torch.Tensor]: A function that applies the specified
+        logarithmic transformation to a tensor of depth values.
+
+    Raises:
+        ValueError: If an unsupported projection method is provided.
+    """
+    if projection == "log":
+        return torch.log
+    elif projection == "log10":
+        return torch.log10
+    raise ValueError(f"Unknown projection method: {projection}")
 
 
 def compute_loss(
@@ -149,7 +177,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             default_denoising_steps,
             default_processing_resolution,
         )
-        self.pred_latents_ema: torch.Tensor | None = None
 
     def _affine_to_metric(
         self,
@@ -243,12 +270,11 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         sparses: torch.Tensor,
         max_depth: float,
         min_depth: float = 0.0,
+        projection: str = "linear",  # "linear", "log", "log10"
         norm: str = "minmax",
         percentile: float = 0.05,
         pred_latents_prev: torch.Tensor | None = None,
         beta: float = 0.9,
-        ema: bool = False,
-        alpha: float = 0.9,
         steps: int = 50,
         resolution: int = 768,
         affine_invariant: bool = True,
@@ -259,7 +285,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         kl_mode: str = "simple-forward",
         interp_mode: str = "bilinear",
         loss_funcs: list[str] | None = None,
-        log_scale: bool = False,
         scale_grad_by_noise: bool = True,
         seed: int = 2024,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -278,6 +303,10 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 Raw depth values, not normalized.
             max_depth (float): Maximum depth value for normalization.
             min_depth (float, optional): Minimum depth value for normalization. Defaults to 0.0.
+            projection (str, optional): Projection method for depth values.
+                Options are "linear", "log", or "log10". When "log" or "log10" is used, depth values
+                are transformed to log space before processing, which can improve accuracy for scenes
+                with large depth ranges. Defaults to "linear".
             norm (str, optional): Normalization method for input sparse depth maps.
                 Options are "const", "minmax", or "percentile". Defaults to "minmax".
             percentile (float, optional): Percentile value for determining depth range.
@@ -289,10 +318,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             beta (float, optional): Momentum factor for prediction latents between frames.
                 Must be in range [0, 1]. Higher values give more weight to new latents,
                 while lower values preserve more information from previous frames. Defaults to 0.9.
-            ema (bool, optional): Whether to use exponential moving average for temporal consistency.
-                When True, uses EMA with alpha parameter for smoother transitions. Defaults to False.
-            alpha (float, optional): EMA coefficient when ema=True. Controls the weight of previous
-                predictions in the moving average. Must be in range [0, 1]. Defaults to 0.9.
             steps (int, optional): Number of denoising steps.
                 Higher values give better quality but slower inference. Defaults to 50.
             resolution (int, optional): Resolution for internal processing.
@@ -325,10 +350,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 If None, defaults to ["l1", "l2"]. Supported options are
                 "l1", "l2", "edge", and "smooth". When using "edge" or "smooth",
                 the RGB image is used to guide depth discontinuities. Defaults to None.
-            log_scale (bool, optional): Whether to use logarithmic scale for depth values.
-                When True, depth values are transformed using natural logarithm before processing
-                and exponentiated after processing. This can improve depth estimation for scenes
-                with large depth ranges. Requires min_depth > 0. Defaults to False.
             scale_grad_by_noise (bool, optional): Whether to scale gradients by the norm of predicted noise.
                 When True, gradients are scaled up to prevent vanishing gradients caused by miscalibrated
                 noise predictions. This typically improves convergence and final results. Defaults to True.
@@ -383,11 +404,15 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         if beta < 0 or beta > 1:
             raise ValueError(f"beta must be in [0, 1], but got {beta}")
 
-        # Check if min_depth > 0 when log_scale is True
-        if log_scale and min_depth <= EPSILON:
+        # Check projection method
+        if projection not in ["linear", "log", "log10"]:
+            raise ValueError(f"Unknown projection method: {projection}")
+
+        # Check if min_depth > 0 when projection is "log"
+        if projection in ["log", "log10"] and min_depth <= EPSILON:
             raise ValueError(
                 f"min_depth must be > {EPSILON} when "
-                f"log_scale is True, but got {min_depth}"
+                f"projection is 'log' or 'log10', but got {min_depth}"
             )
 
         # Set learning rates
@@ -431,18 +456,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 imgs_resized, None, generator, 1, N
             )  # [N, 4, EH, EW], [N, 4, EH, EW]
             if pred_latents_prev is not None:
-                if ema:
-                    if self.pred_latents_ema is None:
-                        self.pred_latents_ema = pred_latents = pred_latents_common
-                    else:
-                        self.pred_latents_ema = pred_latents = (
-                            self.pred_latents_ema * alpha
-                            + (1 - alpha) * pred_latents_prev
-                        )
-                else:
-                    pred_latents = (
-                        beta * pred_latents_common + (1 - beta) * pred_latents_prev
-                    )
+                pred_latents = (
+                    beta * pred_latents_common + (1 - beta) * pred_latents_prev
+                )
             else:
                 pred_latents = pred_latents_common
 
@@ -486,15 +502,14 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         min_depths_log: torch.Tensor | None = None
         max_depths_log: torch.Tensor | None = None
         sparses_clamped_log: torch.Tensor | None = None
-        if log_scale:
-            min_depths_log, max_depths_log = torch.log(min_depths), torch.log(
-                max_depths
-            )
-            sparses_clamped_log = torch.log(sparses_clamped)
+        if projection in ["log", "log10"]:
+            log_fn = get_projection_fn(projection)
+            min_depths_log, max_depths_log = log_fn(min_depths), log_fn(max_depths)
+            sparses_clamped_log = log_fn(sparses_clamped)
             sparses_normed = (sparses_clamped_log - min_depths_log) / (
                 max_depths_log - min_depths_log
             )
-        else:
+        else:  # "linear"
             sparses_normed = (sparses_clamped - min_depths) / (max_depths - min_depths)
         sparses_min, sparses_max = utils.masked_minmax(
             sparses_normed, masks, dims=(1, 2, 3)
@@ -584,12 +599,12 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 interp_mode=interp_mode,
             )  # [N, 1, H, W]
             denses_normed = denses_normed.clamp(min=0.0, max=1.0)
-            if log_scale:
+            if projection in ["log", "log10"]:
                 assert min_depths_log is not None and max_depths_log is not None
                 # To metric units
                 denses_normed = denses_normed * (max_depths - min_depths) + min_depths
                 # To normed log scale
-                denses_normed = torch.log(denses_normed)
+                denses_normed = get_projection_fn(projection)(denses_normed)
                 denses_normed = (denses_normed - min_depths_log) / (
                     max_depths_log - min_depths_log
                 )

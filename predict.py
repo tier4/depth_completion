@@ -264,27 +264,10 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "--ema",
-    type=bool,
-    default=False,
-    help="Whether to use exponential moving average for temporal consistency. "
-    "Only used when --use-prev-latent=True.",
-    show_default=True,
-)
-@click.option(
-    "--alpha",
-    type=click.FloatRange(min=0, max=1),
-    default=0.9,
-    help="EMA coefficient when ema=True. Controls the weight of previous "
-    "predictions in the moving average. Used when --use-prev-latent=True.",
-    show_default=True,
-)
-@click.option(
     "--beta",
     type=click.FloatRange(min=0, min_open=True),
     default=0.9,
-    help="Weight for the latent consistency term when --ema=False. "
-    "Only used when --use-prev-latent=True",
+    help="Weight for the latent consistency term. " "Used when --use-prev-latent=True",
     show_default=True,
 )
 @click.option(
@@ -302,10 +285,13 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "--log-scale",
-    type=bool,
-    default=False,
-    help="Whether to log scale the depth values.",
+    "--projection",
+    type=click.Choice(["linear", "log", "log10"]),
+    default="linear",
+    help="Projection method for depth values. "
+    "linear - Linear projection. "
+    "log - Logarithmic projection. "
+    "log10 - Logarithmic base 10 projection. ",
     show_default=True,
 )
 @click.option(
@@ -341,8 +327,6 @@ def main(
     lr_latent: float,
     lr_scaling: float,
     use_prev_latent: bool,
-    ema: bool,
-    alpha: float,
     beta: float,
     batch_size: int,
     kl_penalty: bool,
@@ -350,7 +334,7 @@ def main(
     kl_mode: str,
     use_segmask: bool,
     affine_invariant: bool,
-    log_scale: bool,
+    projection: str,
     scale_grad_by_noise: bool,
 ) -> None:
     # Set log level
@@ -399,6 +383,15 @@ def main(
             "This will be fixed in the future"
         )
         batch_size = 1
+
+    # NOTE:
+    # Force norm = "minmax" when projection = "log" or "log10" and norm = "const"
+    if projection in ["log", "log10"] and norm == "const":
+        logger.error(
+            "norm=const is not allowed when projection=log or log10. "
+            "Falling back to norm=minmax"
+        )
+        norm = "minmax"
 
     ############################################################
     # Model initialization
@@ -617,11 +610,10 @@ def main(
                 batch_sparses,
                 max_depth,
                 min_depth=min_depth,
+                projection=projection,
                 norm=norm,
                 percentile=percentile,
                 pred_latents_prev=batch_pred_latents_prev,
-                ema=ema,
-                alpha=alpha,
                 beta=beta,
                 steps=steps,
                 resolution=res,
@@ -633,7 +625,6 @@ def main(
                 kl_mode=kl_mode,
                 kl_weight=kl_weight,
                 affine_invariant=affine_invariant,
-                log_scale=log_scale,
                 scale_grad_by_noise=scale_grad_by_noise,
             )
             batch_denses = cast(torch.Tensor, batch_denses)
