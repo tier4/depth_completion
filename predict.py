@@ -295,6 +295,13 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
+    "--inv",
+    type=bool,
+    default=False,
+    help="Whether to use inverse projection.",
+    show_default=True,
+)
+@click.option(
     "--scale-grad-by-noise",
     type=bool,
     default=True,
@@ -335,6 +342,7 @@ def main(
     use_segmask: bool,
     affine_invariant: bool,
     projection: str,
+    inv: bool,
     scale_grad_by_noise: bool,
 ) -> None:
     # Set log level
@@ -386,7 +394,7 @@ def main(
 
     # NOTE:
     # Force norm = "minmax" when projection = "log" or "log10" and norm = "const"
-    if projection in ["log", "log10"] and norm == "const":
+    if (projection in ["log", "log10"] or inv) and norm == "const":
         logger.error(
             "norm=const is not allowed when projection=log or log10. "
             "Falling back to norm=minmax"
@@ -611,6 +619,7 @@ def main(
                 max_depth,
                 min_depth=min_depth,
                 projection=projection,
+                inv=inv,
                 norm=norm,
                 percentile=percentile,
                 pred_latents_prev=batch_pred_latents_prev,

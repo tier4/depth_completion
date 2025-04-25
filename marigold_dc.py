@@ -44,6 +44,8 @@ def get_projection_fn(projection: str) -> Callable[[torch.Tensor], torch.Tensor]
         return torch.log
     elif projection == "log10":
         return torch.log10
+    elif projection == "linear":
+        return lambda x: x
     raise ValueError(f"Unknown projection method: {projection}")
 
 
@@ -271,6 +273,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         max_depth: float,
         min_depth: float = 0.0,
         projection: str = "linear",  # "linear", "log", "log10"
+        inv: bool = False,
         norm: str = "minmax",
         percentile: float = 0.05,
         pred_latents_prev: torch.Tensor | None = None,
@@ -307,6 +310,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 Options are "linear", "log", or "log10". When "log" or "log10" is used, depth values
                 are transformed to log space before processing, which can improve accuracy for scenes
                 with large depth ranges. Defaults to "linear".
+            inv (bool, optional): Whether to apply inverse projection (1/depth).
+                When True, the model works with inverse depth (disparity) which can improve
+                accuracy for distant objects. Defaults to False.
             norm (str, optional): Normalization method for input sparse depth maps.
                 Options are "const", "minmax", or "percentile". Defaults to "minmax".
             percentile (float, optional): Percentile value for determining depth range.
@@ -328,8 +334,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 This allows the model to work with different depth sensors and units without retraining.
                 The model will automatically estimate the appropriate scale and shift parameters
                 to align its predictions with the input sparse measurements. Defaults to True.
-            opt (str, optional): Optimizer to use ("adam", "sgd", "adadelta", or "adagrad"). Defaults to "adam".
-                Note that when opt="adadelta", the learning rate is fixed to 1.0 regardless of the lr parameter.
+            opt (str, optional): Optimizer to use ("adam", "sgd", "adagrad", or "adadelta").
+                Defaults to "adam". Note that when opt="adadelta", the learning rate is fixed to 1.0
+                regardless of the lr parameter.
             lr (tuple[float, float] | None, optional): Learning rates for (latent, scaling).
                 If None, defaults to (0.05, 0.005). For "adadelta" optimizer, this parameter is ignored.
             kl_penalty (bool, optional): Whether to apply KL divergence penalty to
@@ -409,10 +416,11 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             raise ValueError(f"Unknown projection method: {projection}")
 
         # Check if min_depth > 0 when projection is "log"
-        if projection in ["log", "log10"] and min_depth <= EPSILON:
+        if (projection in ["log", "log10"] or inv) and min_depth <= EPSILON:
             raise ValueError(
                 f"min_depth must be > {EPSILON} when "
-                f"projection is 'log' or 'log10', but got {min_depth}"
+                f"projection is 'log' or 'log10' or inv is True, "
+                f"but got {min_depth}"
             )
 
         # Set learning rates
@@ -499,18 +507,15 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         )
 
         # Normalize sparse depth maps
-        min_depths_log: torch.Tensor | None = None
-        max_depths_log: torch.Tensor | None = None
-        sparses_clamped_log: torch.Tensor | None = None
-        if projection in ["log", "log10"]:
-            log_fn = get_projection_fn(projection)
-            min_depths_log, max_depths_log = log_fn(min_depths), log_fn(max_depths)
-            sparses_clamped_log = log_fn(sparses_clamped)
-            sparses_normed = (sparses_clamped_log - min_depths_log) / (
-                max_depths_log - min_depths_log
-            )
-        else:  # "linear"
-            sparses_normed = (sparses_clamped - min_depths) / (max_depths - min_depths)
+        proj_fn = get_projection_fn(projection)
+        min_depths_proj, max_depths_proj = proj_fn(min_depths), proj_fn(max_depths)
+        sparses_clamped_proj = proj_fn(sparses_clamped)
+        if inv:
+            min_depths_proj, max_depths_proj = 1 / max_depths_proj, 1 / min_depths_proj
+            sparses_clamped_proj = 1 / sparses_clamped_proj
+        sparses_normed = (sparses_clamped_proj - min_depths_proj) / (
+            max_depths_proj - min_depths_proj
+        )
         sparses_min, sparses_max = utils.masked_minmax(
             sparses_normed, masks, dims=(1, 2, 3)
         )
@@ -599,14 +604,19 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 interp_mode=interp_mode,
             )  # [N, 1, H, W]
             denses_normed = denses_normed.clamp(min=0.0, max=1.0)
-            if projection in ["log", "log10"]:
-                assert min_depths_log is not None and max_depths_log is not None
-                # To metric units
+            if projection != "linear":
                 denses_normed = denses_normed * (max_depths - min_depths) + min_depths
-                # To normed log scale
                 denses_normed = get_projection_fn(projection)(denses_normed)
-                denses_normed = (denses_normed - min_depths_log) / (
-                    max_depths_log - min_depths_log
+                if inv:
+                    denses_normed = 1 / denses_normed
+                denses_normed = (denses_normed - min_depths_proj) / (
+                    max_depths_proj - min_depths_proj
+                )
+            elif inv:
+                denses_normed = denses_normed * (max_depths - min_depths) + min_depths
+                denses_normed = 1 / denses_normed
+                denses_normed = (denses_normed - min_depths_proj) / (
+                    max_depths_proj - min_depths_proj
                 )
 
             losses = compute_loss(
