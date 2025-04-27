@@ -230,15 +230,13 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 )
 @click.option(
     "--kl-mode",
-    type=click.Choice(["simple-forward", "forward", "symmetric"]),
-    default="simple-forward",
+    type=click.Choice(["simple", "strict"]),
+    default="simple",
     help="KL divergence mode. "
-    "simple-forward - Uses a simplified penalty "
+    "simple - Uses a simplified penalty "
     "based on squared L2 norm of latents. "
-    "forward - Computes proper forward KL divergence between "
-    "latent distribution and N(0,1). "
-    "symmetric - Computes both forward and backward KL "
-    "divergence for more robust regularization.",
+    "strict - Computes proper forward KL divergence between "
+    "latent distribution and N(0,1). ",
     show_default=True,
 )
 @click.option(
