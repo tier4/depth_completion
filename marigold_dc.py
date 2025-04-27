@@ -288,7 +288,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         kl_mode: str = "simple-forward",
         interp_mode: str = "bilinear",
         loss_funcs: list[str] | None = None,
-        scale_grad_by_noise: bool = True,
         seed: int = 2024,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -357,9 +356,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 If None, defaults to ["l1", "l2"]. Supported options are
                 "l1", "l2", "edge", and "smooth". When using "edge" or "smooth",
                 the RGB image is used to guide depth discontinuities. Defaults to None.
-            scale_grad_by_noise (bool, optional): Whether to scale gradients by the norm of predicted noise.
-                When True, gradients are scaled up to prevent vanishing gradients caused by miscalibrated
-                noise predictions. This typically improves convergence and final results. Defaults to True.
             seed (int, optional): Random seed for initializing the diffusion process generator and reproducibility.
                 Defaults to 2024.
 
@@ -576,14 +572,12 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             ]  # [N, 4, EH, EW]
 
             # Compute noise to later rescale the depth latent gradient
-            pred_epsilons: torch.Tensor | None = None
-            if scale_grad_by_noise:
-                with torch.no_grad():
-                    a_prod_t = cast(float, self.scheduler.alphas_cumprod[t])
-                    b_prod_t = 1 - a_prod_t
-                    pred_epsilons = (a_prod_t**0.5) * pred_noises + (
-                        b_prod_t**0.5
-                    ) * pred_latents  # [N, 4, EH, EW]
+            with torch.no_grad():
+                a_prod_t = cast(float, self.scheduler.alphas_cumprod[t])
+                b_prod_t = 1 - a_prod_t
+                pred_epsilons = (a_prod_t**0.5) * pred_noises + (
+                    b_prod_t**0.5
+                ) * pred_latents  # [N, 4, EH, EW]
 
             # Preview the final output depth with Tweedie's formula
             previews = cast(
@@ -659,22 +653,20 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
             # NOTE: Scale grads of pred_latents by the norm of pred_epsilons
             # for stable optimization
-            if scale_grad_by_noise:
-                with torch.no_grad():
-                    assert pred_latents.grad is not None
-                    assert pred_epsilons is not None
-                    pred_epsilon_norms = torch.linalg.norm(
-                        pred_epsilons.view(N, -1), dim=1
-                    )  # [N]
-                    pred_latent_grad_norms = torch.linalg.norm(
-                        pred_latents.grad.view(N, -1), dim=1
-                    )  # [N]
-                    factors = pred_epsilon_norms / torch.clamp(
-                        pred_latent_grad_norms, min=EPSILON
-                    )  # [N]
-                    factors = factors.view(N, 1, 1, 1)  # [N, 1, 1, 1]
-                    # Scaling
-                    pred_latents.grad *= factors  # [N, 4, EH, EW]
+            with torch.no_grad():
+                assert pred_latents.grad is not None
+                pred_epsilon_norms = torch.linalg.norm(
+                    pred_epsilons.view(N, -1), dim=1
+                )  # [N]
+                pred_latent_grad_norms = torch.linalg.norm(
+                    pred_latents.grad.view(N, -1), dim=1
+                )  # [N]
+                factors = pred_epsilon_norms / torch.clamp(
+                    pred_latent_grad_norms, min=EPSILON
+                )  # [N]
+                factors = factors.view(N, 1, 1, 1)  # [N, 1, 1, 1]
+                # Scaling
+                pred_latents.grad *= factors  # [N, 4, EH, EW]
 
             # Backprop
             optimizer.step()

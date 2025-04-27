@@ -301,13 +301,6 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     help="Whether to use inverse projection.",
     show_default=True,
 )
-@click.option(
-    "--scale-grad-by-noise",
-    type=bool,
-    default=True,
-    help="Whether to scale the gradient by the noise.",
-    show_default=True,
-)
 def main(
     src_root: Path,
     dst_root: Path,
@@ -343,7 +336,6 @@ def main(
     affine_invariant: bool,
     projection: str,
     inv: bool,
-    scale_grad_by_noise: bool,
 ) -> None:
     # Set log level
     logger.remove()
@@ -634,7 +626,6 @@ def main(
                 kl_mode=kl_mode,
                 kl_weight=kl_weight,
                 affine_invariant=affine_invariant,
-                scale_grad_by_noise=scale_grad_by_noise,
             )
             batch_denses = cast(torch.Tensor, batch_denses)
             batch_pred_latents = cast(torch.Tensor, batch_pred_latents)
