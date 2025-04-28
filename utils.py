@@ -22,6 +22,62 @@ DATASET_DIR_NAME_IMAGE = "image"
 DATASET_DIR_NAME_SEGMASK = "segmask"
 RESULT_DIR_NAME_DENSE = "dense"
 RESULT_DIR_NAME_VIS = "vis"
+EPSILON = 1e-7
+
+
+def kld_stdnorm(
+    x: torch.Tensor, reduction: str = "mean", mode: str = "simple"
+) -> torch.Tensor:
+    """
+    Computes the Kullback-Leibler Divergence (KLD) of a tensor `x` from a standard normal distribution.
+
+    This function calculates the KLD between the input tensor `x` and a standard normal distribution
+    (mean=0, variance=1). The calculation can be done in two modes: 'simple' and 'strict'. The result
+    can be reduced using different methods: 'mean', 'sum', or 'none'.
+
+    Args:
+        x (torch.Tensor): The input tensor for which the KLD is computed. It is expected to have a shape
+                          where the first dimension is the batch size.
+        reduction (str, optional): Specifies the reduction to apply to the output. Supported values are:
+                                   - 'mean': Returns the mean of the KLD values.
+                                   - 'sum': Returns the sum of the KLD values.
+                                   - 'none': Returns the KLD values without any reduction.
+                                   Default is 'mean'.
+        mode (str, optional): Specifies the mode of KLD computation. Supported values are:
+                              - 'simple': Computes the KLD using the squared mean of the tensor.
+                              - 'strict': Computes the KLD using the mean and variance of the tensor.
+                              Default is 'simple'.
+
+    Returns:
+        torch.Tensor: The computed KLD values. The shape and size depend on the specified reduction method.
+
+    Raises:
+        ValueError: If an unknown mode or reduction method is provided.
+
+    Note:
+        The 'simple' mode is computationally less intensive as it only uses the squared mean of the tensor,
+        making it faster but potentially less accurate in capturing the distribution characteristics.
+        The 'strict' mode, on the other hand, considers both the mean and variance, providing a more
+        accurate representation of the KLD at the cost of increased computational complexity.
+    """  # noqa: E501
+    N = x.shape[0]
+    x_ = x.reshape(N, -1)
+    eps = torch.finfo(x.dtype).eps
+    if mode == "simple":
+        dist = x_.square().mean(dim=-1)
+    elif mode == "strict":
+        mu = x.mean(dim=-1)
+        var = x.var(dim=-1, unbiased=False)
+        dist = 0.5 * (mu.square() + var - torch.log(var + eps) - 1)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+    if reduction == "mean":
+        return dist.mean()
+    elif reduction == "sum":
+        return dist.sum()
+    elif reduction == "none":
+        return dist
+    raise ValueError(f"Unknown reduction: {reduction}")
 
 
 def masked_minmax(

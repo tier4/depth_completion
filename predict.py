@@ -221,7 +221,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     help="Learning rate for scale and shift parameters.",
 )
 @click.option(
-    "--kl-penalty",
+    "--kld",
     type=bool,
     default=False,
     help="Whether to apply KL divergence penalty to keep "
@@ -229,7 +229,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "--kl-mode",
+    "--kld-mode",
     type=click.Choice(["simple", "strict"]),
     default="simple",
     help="KL divergence mode. "
@@ -240,7 +240,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "--kl-weight",
+    "--kld-weight",
     type=click.FloatRange(min=0, min_open=True),
     default=0.1,
     help="Weight for the KL divergence penalty term.",
@@ -327,9 +327,9 @@ def main(
     use_prev_latent: bool,
     beta: float,
     batch_size: int,
-    kl_penalty: bool,
-    kl_weight: float,
-    kl_mode: str,
+    kld: bool,
+    kld_weight: float,
+    kld_mode: str,
     use_segmask: bool,
     affine_invariant: bool,
     projection: str,
@@ -620,9 +620,9 @@ def main(
                 loss_funcs=loss_funcs,
                 opt=opt,
                 lr=(lr_latent, lr_scaling),
-                kl_penalty=kl_penalty,
-                kl_mode=kl_mode,
-                kl_weight=kl_weight,
+                kld=kld,
+                kld_mode=kld_mode,
+                kld_weight=kld_weight,
                 affine_invariant=affine_invariant,
             )
             batch_denses = cast(torch.Tensor, batch_denses)

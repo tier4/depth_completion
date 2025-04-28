@@ -283,84 +283,84 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         affine_invariant: bool = True,
         opt: str = "adam",
         lr: tuple[float, float] | None = None,
-        kl_penalty: bool = False,
-        kl_weight: float = 0.1,
-        kl_mode: str = "simple",
+        kld: bool = False,
+        kld_weight: float = 0.1,
+        kld_mode: str = "simple",
         interp_mode: str = "bilinear",
         loss_funcs: list[str] | None = None,
         seed: int = 2024,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Perform depth completion on a batch of RGB images using sparse depth measurements.
+        Executes depth completion on a batch of RGB images using sparse depth measurements.
 
-        This method implements the core depth completion algorithm using a diffusion-based approach.
-        It iteratively refines depth predictions by optimizing latent representations through
-        a denoising process guided by sparse depth measurements.
+        This function implements the primary depth completion algorithm through a diffusion-based approach.
+        It refines depth predictions iteratively by optimizing latent representations via a denoising process
+        guided by sparse depth measurements.
 
         Args:
-            imgs (torch.Tensor): Batch of RGB images with shape [N, C, H, W].
-                Raw images, not normalized to [0, 1].
-            sparses (torch.Tensor): Batch of sparse depth maps with shape [N, 1, H, W].
-                Should have zeros at missing positions and positive values at measurement points.
-                Raw depth values, not normalized.
-            max_depth (float): Maximum depth value for normalization.
-            min_depth (float, optional): Minimum depth value for normalization. Defaults to 0.0.
-            projection (str, optional): Projection method for depth values.
-                Options are "linear", "log", or "log10". When "log" or "log10" is used, depth values
-                are transformed to log space before processing, which can improve accuracy for scenes
-                with large depth ranges. Defaults to "linear".
-            inv (bool, optional): Whether to apply inverse projection (1/depth).
-                When True, the model works with inverse depth (disparity) which can improve
+            imgs (torch.Tensor): A batch of RGB images with dimensions [N, C, H, W].
+                These are raw images, not normalized to the [0, 1] range.
+            sparses (torch.Tensor): A batch of sparse depth maps with dimensions [N, 1, H, W].
+                These maps should have zeros at missing positions and positive values at measurement points.
+                The depth values are raw and not normalized.
+            max_depth (float): The maximum depth value for normalization.
+            min_depth (float, optional): The minimum depth value for normalization. Defaults to 0.0.
+            projection (str, optional): The method for projecting depth values.
+                Options include "linear", "log", or "log10". Using "log" or "log10" transforms depth values
+                to log space before processing, which can enhance accuracy for scenes with large depth ranges.
+                Defaults to "linear".
+            inv (bool, optional): Indicates whether to apply inverse projection (1/depth).
+                When set to True, the model operates with inverse depth (disparity), which can enhance
                 accuracy for distant objects. Defaults to False.
-            norm (str, optional): Normalization method for input sparse depth maps.
-                Options are "const", "minmax", or "percentile". Defaults to "minmax".
-            percentile (float, optional): Percentile value for determining depth range.
-                Only used when norm="percentile". Lower values (e.g., 0.05) exclude outliers
+            norm (str, optional): The normalization method for input sparse depth maps.
+                Options include "const", "minmax", or "percentile". Defaults to "minmax".
+            percentile (float, optional): The percentile value for determining the depth range.
+                Used only when norm="percentile". Lower values (e.g., 0.05) exclude outliers
                 by using the 5th and 95th percentiles. Defaults to 0.05.
             pred_latents_prev (torch.Tensor | None, optional): Previous prediction latents
-                with shape [N, 4, EH, EW] from a prior frame or iteration.
-                Enables temporal consistency when processing video sequences. Defaults to None.
-            beta (float, optional): Momentum factor for prediction latents between frames.
-                Must be in range [0, 1]. Higher values give more weight to new latents,
-                while lower values preserve more information from previous frames. Defaults to 0.9.
-            steps (int, optional): Number of denoising steps.
-                Higher values give better quality but slower inference. Defaults to 50.
-            resolution (int, optional): Resolution for internal processing.
-                Higher values give better quality but use more memory. Defaults to 768.
-            affine_invariant (bool, optional): Whether to use affine invariant depth completion.
-                When True, the model applies affine transformations to handle arbitrary depth scales
+                with dimensions [N, 4, EH, EW] from a prior frame or iteration.
+                This enables temporal consistency when processing video sequences. Defaults to None.
+            beta (float, optional): The momentum factor for prediction latents between frames.
+                Must be within the range [0, 1]. Higher values give more weight to new latents,
+                while lower values retain more information from previous frames. Defaults to 0.9.
+            steps (int, optional): The number of denoising steps.
+                Higher values yield better quality but result in slower inference. Defaults to 50.
+            resolution (int, optional): The resolution for internal processing.
+                Higher values yield better quality but consume more memory. Defaults to 768.
+            affine_invariant (bool, optional): Indicates whether to use affine invariant depth completion.
+                When set to True, the model applies affine transformations to manage arbitrary depth scales
                 and shifts between the model's internal representation and the input sparse depth.
-                This allows the model to work with different depth sensors and units without retraining.
+                This allows the model to function with different depth sensors and units without retraining.
                 The model will automatically estimate the appropriate scale and shift parameters
                 to align its predictions with the input sparse measurements. Defaults to True.
-            opt (str, optional): Optimizer to use ("adam", "sgd", "adagrad", or "adadelta").
-                Defaults to "adam". Note that when opt="adadelta", the learning rate is fixed to 1.0
+            opt (str, optional): The optimizer to use ("adam", "sgd", "adagrad", or "adadelta").
+                Defaults to "adam". Note that when opt="adadelta", the learning rate is fixed at 1.0
                 regardless of the lr parameter.
             lr (tuple[float, float] | None, optional): Learning rates for (latent, scaling).
-                If None, defaults to (0.05, 0.005). For "adadelta" optimizer, this parameter is ignored.
-            kl_penalty (bool, optional): Whether to apply KL divergence penalty to
+                If None, defaults to (0.05, 0.005). For the "adadelta" optimizer, this parameter is ignored.
+            kld (bool, optional): Indicates whether to apply a KL divergence penalty to
                 keep prediction latents close to N(0,1). Defaults to False.
-            kl_weight (float, optional): Weight for KL divergence penalty.
-                Only used when kl_penalty is True. Defaults to 0.1.
-            kl_mode (str, optional): KL divergence mode. Options are:
-                - "simple": Uses a simplified penalty based on squared L2 norm of latents.
-                  Fastest but least accurate approximation of KL divergence.
-                - "strict": Computes proper forward KL divergence between latent distribution and N(0,1).
-                  More accurate but slightly more computationally expensive.
+            kld_weight (float, optional): The weight for the KL divergence penalty.
+                Used only when kld is True. Defaults to 0.1.
+            kld_mode (str, optional): The KL divergence mode. Options include:
+                - "simple": Uses a simplified penalty based on the squared L2 norm of latents.
+                  This is the fastest but least accurate approximation of KL divergence.
+                - "strict": Computes the proper forward KL divergence between the latent distribution and N(0,1).
+                  This is more accurate but slightly more computationally expensive.
                 Defaults to "simple".
-            interp_mode (str, optional): Interpolation mode for resizing.
+            interp_mode (str, optional): The interpolation mode for resizing.
                 Options include "bilinear", "bicubic", etc. Defaults to "bilinear".
-            loss_funcs (list[str] | None, optional): Loss functions to use.
-                If None, defaults to ["l1", "l2"]. Supported options are
+            loss_funcs (list[str] | None, optional): The loss functions to use.
+                If None, defaults to ["l1", "l2"]. Supported options include
                 "l1", "l2", "edge", and "smooth". When using "edge" or "smooth",
                 the RGB image is used to guide depth discontinuities. Defaults to None.
-            seed (int, optional): Random seed for initializing the diffusion process generator and reproducibility.
+            seed (int, optional): The random seed for initializing the diffusion process generator and ensuring reproducibility.
                 Defaults to 2024.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor]:
-                - Dense depth prediction with shape [N, 1, H, W] in metric units (same as input sparse depth)
-                - Prediction latents with shape [N, 4, EH, EW] that can be used for temporal consistency
+                - A dense depth prediction with dimensions [N, 1, H, W] in metric units (same as input sparse depth)
+                - Prediction latents with dimensions [N, 4, EH, EW] that can be used for temporal consistency
                   in subsequent frames
         """  # noqa: E501
         generator = torch.Generator(device=self.device).manual_seed(seed)
@@ -617,19 +617,11 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
             # NOTE: Add KL divergence penalty to keep
             # the distribution of pred_latent close to N(0,1)
-            if kl_penalty:
-                if kl_mode == "simple":
-                    kl_losses = pred_latents.square().mean(dim=(1, 2, 3), keepdim=True)
-                elif kl_mode == "strict":
-                    mu = pred_latents.mean(dim=(1, 2, 3), keepdim=True)
-                    var = pred_latents.var(dim=(1, 2, 3), keepdim=True, unbiased=False)
-                    kl_losses = 0.5 * (mu.square() + var - torch.log(var + EPSILON) - 1)
-                else:
-                    raise ValueError(
-                        f"Invalid kl_mode: {kl_mode}. Use 'simple' or 'strict'"
-                    )
-
-                losses = losses + kl_weight * kl_losses
+            if kld:
+                kld_losses = utils.kld_stdnorm(
+                    pred_latents, reduction="none", mode=kld_mode
+                ).reshape(-1, 1, 1, 1)
+                losses = losses + kld_weight * kld_losses
 
             # Backprop
             losses.backward(torch.ones_like(losses))  # Preserve batch dimension
