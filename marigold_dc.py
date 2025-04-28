@@ -618,18 +618,11 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             # NOTE: Add KL divergence penalty to keep
             # the distribution of pred_latent close to N(0,1)
             if kl_penalty:
-                # NOTE: Convert to float32 to avoid numerical instability
-                pred_latents_fp32 = pred_latents.to(torch.float32)
                 if kl_mode == "simple":
-                    kl_losses = pred_latents_fp32.square().mean(
-                        dim=(1, 2, 3), keepdim=True
-                    )
+                    kl_losses = pred_latents.square().mean(dim=(1, 2, 3), keepdim=True)
                 elif kl_mode == "strict":
-                    # KL divergence between N(mu, sigma^2) and N(0, 1)
-                    mu = pred_latents_fp32.mean(dim=(1, 2, 3), keepdim=True)
-                    var = pred_latents_fp32.var(
-                        dim=(1, 2, 3), keepdim=True, unbiased=False
-                    )
+                    mu = pred_latents.mean(dim=(1, 2, 3), keepdim=True)
+                    var = pred_latents.var(dim=(1, 2, 3), keepdim=True, unbiased=False)
                     kl_losses = 0.5 * (mu.square() + var - torch.log(var + EPSILON) - 1)
                 else:
                     raise ValueError(
