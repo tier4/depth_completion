@@ -14,6 +14,9 @@ import utils
 METRICS = ["mae", "rmse"]
 Metric = Literal["mae", "rmse"]
 
+torch.backends.cudnn.benchmark = True  # NOTE: Optimize convolution algorithms
+torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
+
 
 @click.command(help="Analyze results of depth completion.")
 @click.argument(
@@ -62,10 +65,24 @@ Metric = Literal["mae", "rmse"]
     show_default=True,
 )
 @click.option(
+    "--max-sparse-depth",
+    type=click.FloatRange(min=0, min_open=True),
+    default=120.0,
+    help="Maximum distance in meters of sparse depth maps.",
+    show_default=True,
+)
+@click.option(
     "--max-depth",
     type=click.FloatRange(min=0, min_open=True),
     default=120.0,
-    help="Maximum distance in meters of depth maps.",
+    help="Maximum distance in meters of dense depth maps.",
+    show_default=True,
+)
+@click.option(
+    "--min-depth",
+    type=click.FloatRange(min=0),
+    default=0.0,
+    help="Minimum distance in meters of dense depth maps.",
     show_default=True,
 )
 @click.option(
@@ -80,7 +97,7 @@ Metric = Literal["mae", "rmse"]
     "-nt",
     "--num-threads",
     type=click.IntRange(min=1),
-    default=16,
+    default=8,
     help="Number of threads for loading sparse & dense depth maps.",
     show_default=True,
 )
@@ -101,7 +118,9 @@ def main(
         "TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"
     ],
     bin_size: float,
+    max_sparse_depth: float,
     max_depth: float,
+    min_depth: float,
     batch_size: int,
     num_threads: int,
     cuda: bool,
@@ -142,12 +161,12 @@ def main(
     logger.info(f"Found {len(dataset_dirs):,} datasets")
 
     # Evaluation
-    bin_ranges = utils.calc_bins(0, max_depth, bin_size)
+    bin_ranges = utils.calc_bins(min_depth, max_depth, bin_size)
     scores_overall_all: dict[Metric, list[float]] = {metric: [] for metric in metrics}
     scores_binned_all: list[dict[Metric, list[float]]] = [
         {metric: [] for metric in metrics} for _ in range(len(bin_ranges))
     ]
-    for dataset_dir in dataset_dirs:
+    for dataset_idx, dataset_dir in enumerate(dataset_dirs):
         result_dir = result_root / (dataset_dir.relative_to(dataset_root))
         if not result_dir.exists():
             logger.warning(
@@ -192,9 +211,12 @@ def main(
 
         # Compute overall metrics
         scores_overall: dict[Metric, list[float]] = {metric: [] for metric in metrics}
+        scores_binned: list[dict[Metric, list[float]]] = [
+            {metric: [] for metric in metrics} for _ in range(len(bin_ranges))
+        ]
         progbar = tqdm.tqdm(
             total=len(sparse_paths),
-            desc="Computing overall metrics...",
+            desc=f"{dataset_idx + 1}/{len(dataset_dirs)} - {dataset_dir.name}",
             dynamic_ncols=True,
         )
         for i in range(0, len(sparse_paths), batch_size):
@@ -208,7 +230,7 @@ def main(
                         batch_sparse_paths, mode="RGB", num_threads=num_threads
                     )  # type: ignore
                 ),
-                max_distance=max_depth,
+                max_distance=max_sparse_depth,
             )
             batch_denses = torch.stack(
                 utils.load_tensors(batch_dense_paths, num_threads=num_threads),
@@ -216,94 +238,74 @@ def main(
             if cuda:
                 batch_sparses = batch_sparses.cuda(non_blocking=True)
                 batch_denses = batch_denses.cuda(non_blocking=True)
+            mask = batch_sparses > 0
+            batch_sparses = batch_sparses.clamp(min=min_depth, max=max_depth)
+            batch_denses = batch_denses.clamp(min=min_depth, max=max_depth)
 
             # Compute overall metrics
             for metric in metrics:
-                mask = (batch_sparses > 0) & (batch_sparses <= max_depth)
                 if metric == "mae":
                     score = utils.mae(batch_denses, batch_sparses, mask=mask)
                 else:
                     score = utils.rmse(batch_denses, batch_sparses, mask=mask)
                 scores_overall[metric].append(score)
                 scores_overall_all[metric].append(score)
+
+            # Compute bin-wise metrics
+            if calc_binned_scores:
+                for bin_idx, bin_range in enumerate(bin_ranges):
+                    lower, upper = bin_range
+                    mask_binned = (
+                        mask & (batch_sparses >= lower) & (batch_sparses <= upper)
+                    )
+                    if not torch.any(mask_binned):
+                        continue
+                    for metric in metrics:
+                        if metric == "mae":
+                            score = utils.mae(
+                                batch_denses, batch_sparses, mask=mask_binned
+                            )
+                        else:
+                            score = utils.rmse(
+                                batch_denses, batch_sparses, mask=mask_binned
+                            )
+                        scores_binned[bin_idx][metric].append(score)
+                        scores_binned_all[bin_idx][metric].append(score)
             progbar.update(len(batch_sparse_paths))
         progbar.close()
 
         # Print overall scores
         logger.info(f"[{dataset_dir.name}]:")
-        logger.info(f"  0.0 < x <= {max_depth:.1f}:")
+        logger.info(f"  {min_depth:.1f} <= x <= {max_depth:.1f}:")
         results: dict[str, Any] = {"overall": {}}
         for metric in metrics:
             score = float(np.mean(scores_overall[metric]))
             results["overall"][metric] = score
             logger.info(f"    {metric}: {score:.2f}")
 
-        # Compute bin-wise metrics if requested
+        # Print binned scores
         if calc_binned_scores:
-            scores_binned: list[dict[Metric, list[float]]] = [
-                {metric: [] for metric in metrics} for _ in range(len(bin_ranges))
-            ]
-
-            progbar = tqdm.tqdm(
-                total=len(sparse_paths),
-                desc="Computing binned metrics...",
-                dynamic_ncols=True,
-            )
-            for i in range(0, len(sparse_paths), batch_size):
-                batch_sparse_paths = sparse_paths[i : i + batch_size]
-                batch_dense_paths = dense_paths[i : i + batch_size]
-                batch_sparses = utils.to_depth(
-                    torch.stack(
-                        utils.load_img_tensors(
-                            batch_sparse_paths, mode="RGB", num_threads=num_threads
-                        )  # type: ignore
-                    ),
-                    max_distance=max_depth,
-                )
-                batch_denses = torch.stack(
-                    utils.load_tensors(batch_dense_paths, num_threads=num_threads),
-                )
-                if cuda:
-                    batch_sparses = batch_sparses.cuda(non_blocking=True)
-                    batch_denses = batch_denses.cuda(non_blocking=True)
-
-                # Compute bin-wise metrics
-                for bin_idx, bin_range in enumerate(bin_ranges):
-                    lower, upper = bin_range
-                    mask = (batch_sparses > lower) & (batch_sparses <= upper)
-                    if not torch.any(mask):
-                        continue
-                    for metric in metrics:
-                        if metric == "mae":
-                            score = utils.mae(batch_denses, batch_sparses, mask=mask)
-                        else:
-                            score = utils.rmse(batch_denses, batch_sparses, mask=mask)
-                        scores_binned[bin_idx][metric].append(score)
-                        scores_binned_all[bin_idx][metric].append(score)
-                progbar.update(len(batch_sparse_paths))
-            progbar.close()
-
-            # Print binned scores
             logger.info(f"[{dataset_dir.name}]:")
             results["binned"] = []
             for bin_idx, bin_range in enumerate(bin_ranges):
                 lower, upper = bin_range
                 result: dict[str, Any] = {"range": (lower, upper), "metrics": {}}
-                logger.info(f"  {lower:.1f} < x <= {upper:.1f}:")
+                logger.info(f"  {lower:.1f} <= x <= {upper:.1f}:")
                 for metric in metrics:
                     score = float(np.mean(scores_binned[bin_idx][metric]))
                     result["metrics"][metric] = score
                     logger.info(f"    {metric}: {score:.2f}")
                 results["binned"].append(result)
+
         # Save results
         save_path = result_dir / "results.json"
         with save_path.open("w") as f:
             json.dump(results, f, indent=2)
-        logger.success(f"Saved analysis results to {save_path}")
+        logger.success(f"Saved results to {save_path}")
 
     # Calculate scores for all datasets
     logger.info("[All]:")
-    logger.info(f"  0.0 < x <= {max_depth:.1f}:")
+    logger.info(f"  {min_depth:.1f} <= x <= {max_depth:.1f}:")
     results_all: dict[str, Any] = {"overall": {}, "binned": []}
     for metric in metrics:
         score = float(np.mean(scores_overall_all[metric]))
@@ -314,7 +316,7 @@ def main(
         for bin_idx, bin_range in enumerate(bin_ranges):
             lower, upper = bin_range
             result = {"range": bin_range, "metrics": {}}
-            logger.info(f"  {lower:.1f} < x <= {upper:.1f}:")
+            logger.info(f"  {lower:.1f} <= x <= {upper:.1f}:")
             for metric in metrics:
                 score = float(np.mean(scores_binned_all[bin_idx][metric]))
                 result["metrics"][metric] = score
@@ -325,7 +327,7 @@ def main(
     save_path = result_root / "results_all.json"
     with save_path.open("w") as f:
         json.dump(results_all, f, indent=2)
-    logger.success(f"Saved analysis results for all datasets to {save_path}")
+    logger.success(f"Saved results for all datasets to {save_path}")
 
 
 if __name__ == "__main__":
