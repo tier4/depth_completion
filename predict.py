@@ -87,17 +87,25 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
+    "--max-sparse-depth",
+    type=click.FloatRange(min=0, min_open=True),
+    default=120.0,
+    help="Max absolute distance [m] of input sparse depth maps."
+    "Used to decode range images to depth maps.",
+    show_default=True,
+)
+@click.option(
     "--max-depth",
     type=click.FloatRange(min=0, min_open=True),
     default=120.0,
-    help="Max absolute distance [m] of input sparse depth maps.",
+    help="Max absolute distance [m] of output dense depth maps.",
     show_default=True,
 )
 @click.option(
     "--min-depth",
     type=click.FloatRange(min=0),
     default=0.0,
-    help="Min absolute distance [m] of input sparse depth maps.",
+    help="Min absolute distance [m] of output dense depth maps.",
     show_default=True,
 )
 @click.option(
@@ -307,6 +315,7 @@ def main(
     steps: int,
     res: int,
     norm: str,
+    max_sparse_depth: float,
     max_depth: float,
     min_depth: float,
     percentile: float,
@@ -592,7 +601,7 @@ def main(
             # Create batch tensors and transfer to GPU
             batch_imgs = torch.stack(imgs_list).cuda(non_blocking=True)
             batch_sparses = torch.stack(sparses_list).cuda(non_blocking=True)
-            batch_sparses = utils.to_depth(batch_sparses, max_distance=max_depth)
+            batch_sparses = utils.to_depth(batch_sparses, max_distance=max_sparse_depth)
             if is_segmask_enabled:
                 segmap = segmaps[dataset_dir.name]
                 batch_segmasks = torch.stack(segmasks_list).cuda(non_blocking=True)  # type: ignore
