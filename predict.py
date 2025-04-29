@@ -187,6 +187,13 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
+    "--compile-mode",
+    type=click.Choice(["max-autotune", "reduce-overhead", "default"]),
+    default="reduce-overhead",
+    help="Compilation mode for torch.compile.",
+    show_default=True,
+)
+@click.option(
     "--interp-mode",
     type=click.Choice(["bilinear", "nearest"]),
     default="bilinear",
@@ -328,6 +335,7 @@ def main(
     precision: str,
     compress: str,
     compile_graph: bool,
+    compile_mode: str,
     interp_mode: str,
     loss_funcs: list[str],
     opt: str,
@@ -438,8 +446,8 @@ def main(
 
     # Compile model for faster inference
     if compile_graph:
-        pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead", fullgraph=True)
-        pipe.vae = torch.compile(pipe.vae, mode="reduce-overhead", fullgraph=True)
+        pipe.unet = torch.compile(pipe.unet, mode=compile_mode, fullgraph=True)
+        pipe.vae = torch.compile(pipe.vae, mode=compile_mode, fullgraph=True)
         logger.warning(
             "torch.compile is enabled, which takes a long time for "
             "the first inference path to compile. This is normal and expected"

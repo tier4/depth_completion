@@ -210,7 +210,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         """  # noqa: E501
         return (scale**2) * sparse_range * dense + (shift**2) * sparse_min
 
-    def _latent_to_den(
+    def _latent_to_dense(
         self,
         latent: torch.Tensor,  # [N, 4, EH, EW]
         orig_res: tuple[int, int],
@@ -586,7 +586,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             )  # [N, 4, EH, EW]
 
             # Predict dense depth maps
-            denses_normed = self._latent_to_den(
+            denses_normed = self._latent_to_dense(
                 previews,
                 orig_res,
                 padding,
@@ -655,7 +655,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         # Compute final dense depth maps
         with torch.no_grad():
             pred_latents_detached = pred_latents.detach()
-            denses_normed = self._latent_to_den(
+            denses_normed = self._latent_to_dense(
                 pred_latents_detached,
                 orig_res,
                 padding,
