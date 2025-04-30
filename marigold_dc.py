@@ -5,7 +5,7 @@ import torch
 from diffusers import MarigoldDepthPipeline
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.schedulers import DDIMScheduler, LCMScheduler
-from torch.optim import SGD, Adadelta, Adagrad, Adam, Optimizer
+from torch.optim import SGD, Adagrad, Adam, Optimizer
 from transformers import CLIPTextModel, CLIPTokenizer
 
 import utils
@@ -333,11 +333,10 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 This allows the model to function with different depth sensors and units without retraining.
                 The model will automatically estimate the appropriate scale and shift parameters
                 to align its predictions with the input sparse measurements. Defaults to True.
-            opt (str, optional): The optimizer to use ("adam", "sgd", "adagrad", or "adadelta").
-                Defaults to "adam". Note that when opt="adadelta", the learning rate is fixed at 1.0
-                regardless of the lr parameter.
+            opt (str, optional): The optimizer to use ("adam", "sgd", or "adagrad").
+                Defaults to "adam".
             lr (tuple[float, float] | None, optional): Learning rates for (latent, scaling).
-                If None, defaults to (0.05, 0.005). For the "adadelta" optimizer, this parameter is ignored.
+                If None, defaults to (0.05, 0.005).
             kld (bool, optional): Indicates whether to apply a KL divergence penalty to
                 keep prediction latents close to N(0,1). Defaults to False.
             kld_weight (float, optional): The weight for the KL divergence penalty.
@@ -545,11 +544,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             optimizer = SGD(param_groups)
         elif opt == "adagrad":
             optimizer = Adagrad(param_groups)
-        elif opt == "adadelta":
-            # NOTE: Adadelta uses a fixed learning rate of 1
-            for group in param_groups:
-                group["lr"] = 1
-            optimizer = Adadelta(param_groups)
         else:
             raise ValueError(f"Unknown optimizer: {opt}")
 
