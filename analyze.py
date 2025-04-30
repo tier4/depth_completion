@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 import click
-import numpy as np
 import torch
 import tqdm
 from loguru import logger
@@ -162,8 +161,10 @@ def main(
 
     # Evaluation
     bin_ranges = utils.calc_bins(min_depth, max_depth, bin_size)
-    scores_overall_all: dict[Metric, list[float]] = {metric: [] for metric in metrics}
-    scores_binned_all: list[dict[Metric, list[float]]] = [
+    scores_overall_all: dict[Metric, list[torch.Tensor]] = {
+        metric: [] for metric in metrics
+    }
+    scores_binned_all: list[dict[Metric, list[torch.Tensor]]] = [
         {metric: [] for metric in metrics} for _ in range(len(bin_ranges))
     ]
     for dataset_idx, dataset_dir in enumerate(dataset_dirs):
@@ -210,8 +211,10 @@ def main(
         )
 
         # Compute overall metrics
-        scores_overall: dict[Metric, list[float]] = {metric: [] for metric in metrics}
-        scores_binned: list[dict[Metric, list[float]]] = [
+        scores_overall: dict[Metric, list[torch.Tensor]] = {
+            metric: [] for metric in metrics
+        }
+        scores_binned: list[dict[Metric, list[torch.Tensor]]] = [
             {metric: [] for metric in metrics} for _ in range(len(bin_ranges))
         ]
         progbar = tqdm.tqdm(
@@ -279,7 +282,7 @@ def main(
         logger.info(f"  {min_depth:.1f} <= x <= {max_depth:.1f}:")
         results: dict[str, Any] = {"overall": {}}
         for metric in metrics:
-            score = float(np.mean(scores_overall[metric]))
+            score = float(torch.stack(scores_overall[metric]).mean())
             results["overall"][metric] = score
             logger.info(f"    {metric}: {score:.2f}")
 
@@ -292,7 +295,7 @@ def main(
                 result: dict[str, Any] = {"range": (lower, upper), "metrics": {}}
                 logger.info(f"  {lower:.1f} <= x <= {upper:.1f}:")
                 for metric in metrics:
-                    score = float(np.mean(scores_binned[bin_idx][metric]))
+                    score = float(torch.stack(scores_binned[bin_idx][metric]).mean())
                     result["metrics"][metric] = score
                     logger.info(f"    {metric}: {score:.2f}")
                 results["binned"].append(result)
@@ -308,7 +311,7 @@ def main(
     logger.info(f"  {min_depth:.1f} <= x <= {max_depth:.1f}:")
     results_all: dict[str, Any] = {"overall": {}, "binned": []}
     for metric in metrics:
-        score = float(np.mean(scores_overall_all[metric]))
+        score = float(torch.stack(scores_overall_all[metric]).mean())
         results_all["overall"][metric] = score
         logger.info(f"    {metric}: {score:.2f}")
     if calc_binned_scores:
@@ -318,7 +321,7 @@ def main(
             result = {"range": bin_range, "metrics": {}}
             logger.info(f"  {lower:.1f} <= x <= {upper:.1f}:")
             for metric in metrics:
-                score = float(np.mean(scores_binned_all[bin_idx][metric]))
+                score = float(torch.stack(scores_binned_all[bin_idx][metric]).mean())
                 result["metrics"][metric] = score
                 logger.info(f"    {metric}: {score:.2f}")
             results_all["binned"].append(result)

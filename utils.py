@@ -679,39 +679,52 @@ def save_array(
 
 def mae(
     preds: torch.Tensor, depth: torch.Tensor, mask: torch.Tensor | None = None
-) -> float:
-    """Calculate the mean absolute error between two depth maps.
+) -> torch.Tensor:
+    """Compute the mean absolute error (MAE) between two depth maps.
+
+    This function calculates the MAE by comparing the predicted depth map
+    with the ground truth depth map. An optional mask can be applied to
+    focus the error calculation on specific regions.
 
     Args:
-        preds (torch.Tensor): Predicted depth map
-        depth (torch.Tensor): Ground truth depth map
-        mask (torch.Tensor | None, optional): Mask to apply to the depth maps.
+        preds (torch.Tensor): The predicted depth map.
+        depth (torch.Tensor): The ground truth depth map.
+        mask (torch.Tensor | None, optional): A mask to apply to the depth maps,
+            allowing the error calculation to be restricted to certain areas.
+            Defaults to None.
+
     Returns:
-        float: Mean absolute error between the two depth maps
+        torch.Tensor: The mean absolute error between the two depth maps.
     """  # noqa: E501
     if mask is not None:
         preds = preds[mask]
         depth = depth[mask]
-    return torch.mean(torch.abs(preds - depth)).item()
+    return torch.mean(torch.abs(preds - depth))
 
 
 def rmse(
     preds: torch.Tensor, depth: torch.Tensor, mask: torch.Tensor | None = None
-) -> float:
-    """Calculate the root mean squared error between two depth maps.
+) -> torch.Tensor:
+    """Compute the root mean squared error (RMSE) between two depth maps.
+
+    This function calculates the RMSE by comparing the predicted depth map
+    with the ground truth depth map. An optional mask can be applied to
+    focus the error calculation on specific regions.
 
     Args:
-        preds (torch.Tensor): Predicted depth map
-        depth (torch.Tensor): Ground truth depth map
-        mask (torch.Tensor | None, optional): Mask to apply to the depth maps.
+        preds (torch.Tensor): The predicted depth map.
+        depth (torch.Tensor): The ground truth depth map.
+        mask (torch.Tensor | None, optional): A mask to apply to the depth maps,
+            allowing the error calculation to be restricted to certain areas.
+            Defaults to None.
 
     Returns:
-        float: Root mean squared error between the two depth maps
+        torch.Tensor: The root mean squared error between the two depth maps.
     """  # noqa: E501
     if mask is not None:
         preds = preds[mask]
         depth = depth[mask]
-    return torch.sqrt(torch.mean((preds - depth) ** 2)).item()
+    return torch.sqrt(torch.mean((preds - depth) ** 2))
 
 
 class CommaSeparated(click.ParamType):
