@@ -275,7 +275,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         projection: str = "linear",  # "linear", "log", "log10"
         inv: bool = False,
         norm: str = "minmax",
-        percentile: float = 0.05,
+        percentile: tuple[float, float] = (0.01, 0.99),
         pred_latents_prev: torch.Tensor | None = None,
         beta: float = 0.9,
         steps: int = 50,
@@ -314,9 +314,10 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 accuracy for distant objects. Defaults to False.
             norm (str, optional): The normalization method for input sparse depth maps.
                 Options include "const", "minmax", or "percentile". Defaults to "minmax".
-            percentile (float, optional): The percentile value for determining the depth range.
-                Used only when norm="percentile". Lower values (e.g., 0.05) exclude outliers
-                by using the 5th and 95th percentiles. Defaults to 0.05.
+            percentile (tuple[float, float], optional): The percentile values (min, max) used for depth normalization
+                when norm="percentile". Values should be in the range [0, 1]. For example, (0.01, 0.99) means
+                the depth range is determined by the 1st and 99th percentiles of the sparse depth values.
+                This helps exclude outliers when normalizing depth. Defaults to (0.01, 0.99).
             pred_latents_prev (torch.Tensor | None, optional): Previous prediction latents
                 with dimensions [N, 4, EH, EW] from a prior frame or iteration.
                 This enables temporal consistency when processing video sequences. Defaults to None.
@@ -404,6 +405,16 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         if beta < 0 or beta > 1:
             raise ValueError(f"beta must be in [0, 1], but got {beta}")
 
+        # Check percentile lies in [0, 1]
+        if norm == "percentile":
+            if (
+                percentile[0] < 0
+                or percentile[0] > 1
+                or percentile[1] < 0
+                or percentile[1] > 1
+            ):
+                raise ValueError(f"percentile must be in [0, 1], but got {percentile}")
+
         # Check projection method
         if projection not in ["linear", "log", "log10"]:
             raise ValueError(f"Unknown projection method: {projection}")
@@ -474,9 +485,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 [
                     torch.quantile(
                         s[m],
-                        torch.tensor(
-                            [percentile, 1 - percentile], device=sparses.device
-                        ),
+                        torch.tensor(percentile, device=sparses.device),
                     )
                     for s, m in zip(sparses, masks, strict=True)
                 ]

@@ -79,11 +79,13 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 )
 @click.option(
     "--percentile",
-    type=click.FloatRange(min=0, max=1),
-    default=0.05,
-    help="Percentile value for determining depth range from input sparse depth maps. "
-    "Lower values (e.g., 0.05) exclude outliers by using the 5th and 95th percentiles. "
-    "Only used when --depth-range=percentile.",
+    type=utils.CommaSeparated(float),
+    default="0.01,0.99",
+    help="Percentile values for determining depth range from input sparse depth maps. "
+    "Format: min_percentile,max_percentile. Values should be in the range [0, 1]. "
+    "For example, 0.01,0.99 means the depth range is determined by "
+    "the 1st and 99th percentiles of the sparse depth values. "
+    "Only used when --norm=percentile.",
     show_default=True,
 )
 @click.option(
@@ -322,7 +324,7 @@ def main(
     max_sparse_depth: float,
     max_depth: float,
     min_depth: float,
-    percentile: float,
+    percentile: list[float],
     save_dense: bool,
     vis: bool,
     vis_res: tuple[int, int],
