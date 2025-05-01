@@ -167,6 +167,10 @@ def main(
     scores_binned_all: list[dict[Metric, list[torch.Tensor]]] = [
         {metric: [] for metric in metrics} for _ in range(len(bin_ranges))
     ]
+    num_pts_overall_all = torch.tensor(0).cuda()
+    num_pts_binned_all: list[torch.Tensor] = [
+        torch.tensor(0).cuda() for _ in range(len(bin_ranges))
+    ]
     for dataset_idx, dataset_dir in enumerate(dataset_dirs):
         result_dir = result_root / (dataset_dir.relative_to(dataset_root))
         if not result_dir.exists():
@@ -217,6 +221,10 @@ def main(
         scores_binned: list[dict[Metric, list[torch.Tensor]]] = [
             {metric: [] for metric in metrics} for _ in range(len(bin_ranges))
         ]
+        num_pts_overall: torch.Tensor = torch.tensor(0).cuda()
+        num_pts_binned: list[torch.Tensor] = [
+            torch.tensor(0).cuda() for _ in range(len(bin_ranges))
+        ]
         progbar = tqdm.tqdm(
             total=len(sparse_paths),
             desc=f"{dataset_idx + 1}/{len(dataset_dirs)} - {dataset_dir.name}",
@@ -242,6 +250,7 @@ def main(
                 batch_sparses = batch_sparses.cuda(non_blocking=True)
                 batch_denses = batch_denses.cuda(non_blocking=True)
             mask = batch_sparses > 0
+            num_pts = mask.sum()
             batch_sparses = batch_sparses.clamp(min=min_depth, max=max_depth)
             batch_denses = batch_denses.clamp(min=min_depth, max=max_depth)
 
@@ -253,6 +262,8 @@ def main(
                     score = utils.rmse(batch_denses, batch_sparses, mask=mask)
                 scores_overall[metric].append(score)
                 scores_overall_all[metric].append(score)
+            num_pts_overall_all += num_pts
+            num_pts_overall += num_pts
 
             # Compute bin-wise metrics
             if calc_binned_scores:
@@ -261,6 +272,7 @@ def main(
                     mask_binned = (
                         mask & (batch_sparses >= lower) & (batch_sparses <= upper)
                     )
+                    num_pts = mask_binned.sum()
                     if not torch.any(mask_binned):
                         continue
                     for metric in metrics:
@@ -274,6 +286,8 @@ def main(
                             )
                         scores_binned[bin_idx][metric].append(score)
                         scores_binned_all[bin_idx][metric].append(score)
+                    num_pts_binned_all[bin_idx] += num_pts
+                    num_pts_binned[bin_idx] += num_pts
             progbar.update(len(batch_sparse_paths))
         progbar.close()
 
@@ -292,8 +306,13 @@ def main(
             results["binned"] = []
             for bin_idx, bin_range in enumerate(bin_ranges):
                 lower, upper = bin_range
-                result: dict[str, Any] = {"range": (lower, upper), "metrics": {}}
-                logger.info(f"  {lower:.1f} <= x <= {upper:.1f}:")
+                percentage = float(num_pts_binned[bin_idx] / num_pts_overall) * 100
+                result: dict[str, Any] = {
+                    "range": (lower, upper),
+                    "metrics": {},
+                    "percentage": percentage,
+                }
+                logger.info(f"  {lower:.1f} <= x <= {upper:.1f} ({percentage:.1f}%):")
                 for metric in metrics:
                     score = float(torch.stack(scores_binned[bin_idx][metric]).mean())
                     result["metrics"][metric] = score
@@ -318,8 +337,13 @@ def main(
         logger.info("[All]:")
         for bin_idx, bin_range in enumerate(bin_ranges):
             lower, upper = bin_range
-            result = {"range": bin_range, "metrics": {}}
-            logger.info(f"  {lower:.1f} <= x <= {upper:.1f}:")
+            percentage = float(num_pts_binned_all[bin_idx] / num_pts_overall_all) * 100
+            result = {
+                "range": bin_range,
+                "metrics": {},
+                "percentage": percentage,
+            }
+            logger.info(f"  {lower:.1f} <= x <= {upper:.1f} ({percentage:.1f}%)")
             for metric in metrics:
                 score = float(torch.stack(scores_binned_all[bin_idx][metric]).mean())
                 result["metrics"][metric] = score
