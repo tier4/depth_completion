@@ -52,7 +52,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
 @click.option(
     "--calc-binned-scores",
     type=bool,
-    default=False,
+    default=True,
     help="Whether to compute binned scores.",
     show_default=True,
 )
