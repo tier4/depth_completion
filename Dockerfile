@@ -14,7 +14,7 @@ WORKDIR ${WORKDIR}
 # Install system dependencies
 RUN apt update \
     && apt -y install \
-    bash-completion wget vim parallel ffmpeg \
+    bash-completion wget vim parallel jq ffmpeg \
     build-essential libssl-dev zlib1g-dev \
     libbz2-dev libreadline-dev libsqlite3-dev curl git nvtop \
     libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev \
