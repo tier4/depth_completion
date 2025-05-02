@@ -50,6 +50,9 @@ def kld_stdnorm(
 
     Returns:
         torch.Tensor: The computed KLD values. The shape and size depend on the specified reduction method.
+                      For 'none' reduction, returns a tensor of shape [N], where N is the batch size.
+                      For 'mean' reduction, returns a scalar tensor.
+                      For 'sum' reduction, returns a scalar tensor.
 
     Raises:
         ValueError: If an unknown mode or reduction method is provided.
@@ -59,6 +62,9 @@ def kld_stdnorm(
         making it faster but potentially less accurate in capturing the distribution characteristics.
         The 'strict' mode, on the other hand, considers both the mean and variance, providing a more
         accurate representation of the KLD at the cost of increased computational complexity.
+
+        This function is commonly used as a regularization term in diffusion models to ensure
+        that the predicted latent variables remain close to a standard normal distribution.
     """  # noqa: E501
     N = x.shape[0]
     x_ = x.reshape(N, -1)
@@ -66,8 +72,8 @@ def kld_stdnorm(
     if mode == "simple":
         dist = x_.square().mean(dim=-1)
     elif mode == "strict":
-        mu = x.mean(dim=-1)
-        var = x.var(dim=-1, unbiased=False)
+        mu = x_.mean(dim=-1)
+        var = x_.var(dim=-1, unbiased=False)
         dist = 0.5 * (mu.square() + var - torch.log(var + eps) - 1)
     else:
         raise ValueError(f"Unknown mode: {mode}")
