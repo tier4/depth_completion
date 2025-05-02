@@ -461,11 +461,6 @@ def main(
             "torch.compile is enabled, which takes a long time for "
             "the first inference path to compile. This is normal and expected"
         )
-    logger.info(
-        f"Initialized inference pipeline "
-        f"(dtype={precision}, vae={vae}, model={model}, "
-        f"loss_funcs={loss_funcs}, batch_size={batch_size})"
-    )
 
     ############################################################
     # Data loading
