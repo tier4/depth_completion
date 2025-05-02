@@ -257,7 +257,7 @@ def main(
             # Compute overall metrics
             for metric in metrics:
                 if metric == "mae":
-                    score = utils.mae(batch_denses, batch_sparses, mask=mask)
+                    score = utils.mae(batch_denses, batch_sparses, masks=mask)
                 else:
                     score = utils.rmse(batch_denses, batch_sparses, mask=mask)
                 scores_overall[metric].append(score)
@@ -278,7 +278,7 @@ def main(
                     for metric in metrics:
                         if metric == "mae":
                             score = utils.mae(
-                                batch_denses, batch_sparses, mask=mask_binned
+                                batch_denses, batch_sparses, masks=mask_binned
                             )
                         else:
                             score = utils.rmse(

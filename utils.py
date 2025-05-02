@@ -684,7 +684,7 @@ def save_array(
 
 
 def mae(
-    preds: torch.Tensor, depth: torch.Tensor, mask: torch.Tensor | None = None
+    preds: torch.Tensor, targets: torch.Tensor, masks: torch.Tensor | None = None
 ) -> torch.Tensor:
     """Compute the mean absolute error (MAE) between two depth maps.
 
@@ -694,22 +694,22 @@ def mae(
 
     Args:
         preds (torch.Tensor): The predicted depth map.
-        depth (torch.Tensor): The ground truth depth map.
-        mask (torch.Tensor | None, optional): A mask to apply to the depth maps,
+        targets (torch.Tensor): The ground truth depth map.
+        masks (torch.Tensor | None, optional): A mask to apply to the depth maps,
             allowing the error calculation to be restricted to certain areas.
             Defaults to None.
 
     Returns:
         torch.Tensor: The mean absolute error between the two depth maps.
     """  # noqa: E501
-    if mask is not None:
-        preds = preds[mask]
-        depth = depth[mask]
-    return torch.mean(torch.abs(preds - depth))
+    if masks is not None:
+        preds = preds[masks]
+        targets = targets[masks]
+    return torch.mean(torch.abs(preds - targets))
 
 
 def rmse(
-    preds: torch.Tensor, depth: torch.Tensor, mask: torch.Tensor | None = None
+    preds: torch.Tensor, targets: torch.Tensor, masks: torch.Tensor | None = None
 ) -> torch.Tensor:
     """Compute the root mean squared error (RMSE) between two depth maps.
 
@@ -719,18 +719,18 @@ def rmse(
 
     Args:
         preds (torch.Tensor): The predicted depth map.
-        depth (torch.Tensor): The ground truth depth map.
-        mask (torch.Tensor | None, optional): A mask to apply to the depth maps,
+        targets (torch.Tensor): The ground truth depth map.
+        masks (torch.Tensor | None, optional): A mask to apply to the depth maps,
             allowing the error calculation to be restricted to certain areas.
             Defaults to None.
 
     Returns:
         torch.Tensor: The root mean squared error between the two depth maps.
     """  # noqa: E501
-    if mask is not None:
-        preds = preds[mask]
-        depth = depth[mask]
-    return torch.sqrt(torch.mean((preds - depth) ** 2))
+    if masks is not None:
+        preds = preds[masks]
+        targets = targets[masks]
+    return torch.sqrt(torch.mean((preds - targets) ** 2))
 
 
 class CommaSeparated(click.ParamType):

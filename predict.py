@@ -293,7 +293,16 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     "--affine-invariant",
     type=bool,
     default=True,
-    help="Whether to use affine invariant depth completion.",
+    help="Whether to inference affine invariant depth completion.",
+    show_default=True,
+)
+@click.option(
+    "--closed-form",
+    type=bool,
+    default=False,
+    help="Whether to use closed-form solution for affine transformation parameters."
+    "If False, affine transformation parameters are inferred by a neural network. "
+    "This option is valid when --affine-invariant=True.",
     show_default=True,
 )
 @click.option(
@@ -348,6 +357,7 @@ def main(
     kld_mode: str,
     use_segmask: bool,
     affine_invariant: bool,
+    closed_form: bool,
     projection: str,
     inv: bool,
 ) -> None:
@@ -640,6 +650,7 @@ def main(
                 kld_mode=kld_mode,
                 kld_weight=kld_weight,
                 affine_invariant=affine_invariant,
+                closed_form=closed_form,
             )
             batch_denses = cast(torch.Tensor, batch_denses)
             batch_pred_latents = cast(torch.Tensor, batch_pred_latents)
