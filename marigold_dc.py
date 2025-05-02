@@ -499,14 +499,14 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             raise ValueError(f"Unknown norm method: {norm}")
 
         # Clamp depth values to [min_depth, max_depth]
-        if norm in ["minmax", "percentile"]:
-            min_depths = torch.clamp(min_depths, min=min_depth, max=max_depth)
-            max_depths = torch.clamp(max_depths, min=min_depth, max=max_depth)
         sparses_clamped = torch.clamp(
             sparses,
             min=min_depths,
             max=max_depths,
         )
+        if norm in ["minmax", "percentile"]:
+            min_depths = torch.clamp(min_depths, min=min_depth, max=max_depth)
+            max_depths = torch.clamp(max_depths, min=min_depth, max=max_depth)
 
         # Normalize sparse depth maps
         proj_fn = get_projection_fn(projection)
