@@ -259,7 +259,7 @@ def main(
                 if metric == "mae":
                     score = utils.mae(batch_denses, batch_sparses, masks=mask)
                 else:
-                    score = utils.rmse(batch_denses, batch_sparses, mask=mask)
+                    score = utils.rmse(batch_denses, batch_sparses, masks=mask)
                 scores_overall[metric].append(score)
                 scores_overall_all[metric].append(score)
             num_pts_overall_all += num_pts
@@ -282,7 +282,7 @@ def main(
                             )
                         else:
                             score = utils.rmse(
-                                batch_denses, batch_sparses, mask=mask_binned
+                                batch_denses, batch_sparses, masks=mask_binned
                             )
                         scores_binned[bin_idx][metric].append(score)
                         scores_binned_all[bin_idx][metric].append(score)
