@@ -476,18 +476,12 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 )
 
         # Check if beta is in (0, 1)
-        if beta < 0 or beta > 1:
-            raise ValueError(f"beta must be in [0, 1], but got {beta}")
+        if not (0 < beta < 1):
+            raise ValueError(f"beta must be in (0, 1), but got {beta}")
 
         # Check percentile lies in [0, 1]
-        if norm == "percentile":
-            if (
-                percentile[0] < 0
-                or percentile[0] > 1
-                or percentile[1] < 0
-                or percentile[1] > 1
-            ):
-                raise ValueError(f"percentile must be in [0, 1], but got {percentile}")
+        if norm == "percentile" and not all(0 <= p <= 1 for p in percentile):
+            raise ValueError(f"percentile must be in [0, 1], but got {percentile}")
 
         # Check projection method
         if projection not in ["linear", "log", "log10"]:
@@ -551,10 +545,13 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         # Calculate min & max depth values for each sample in the batch
         masks = sparses > 0
         if norm == "minmax":
-            min_depths, max_depths = utils.masked_minmax(sparses, masks, dims=(1, 2, 3))
+            min_depths, max_depths = utils.masked_minmax(
+                sparses.view(N, -1), masks.view(N, -1), dim=-1
+            )
             min_depths = min_depths.view(N, 1, 1, 1)
             max_depths = max_depths.view(N, 1, 1, 1)
         elif norm == "percentile":
+            p = torch.tensor(percentile, device=sparses.device)
             ranges = torch.stack(
                 [
                     torch.quantile(
@@ -573,14 +570,10 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             raise ValueError(f"Unknown norm method: {norm}")
 
         # Clamp depth values to [min_depth, max_depth]
-        sparses_clamped = torch.clamp(
-            sparses,
-            min=min_depths,
-            max=max_depths,
-        )
+        sparses_clamped = sparses.clamp(min=min_depths, max=max_depths)
         if norm in ["minmax", "percentile"]:
-            min_depths = torch.clamp(min_depths, min=min_depth, max=max_depth)
-            max_depths = torch.clamp(max_depths, min=min_depth, max=max_depth)
+            min_depths = min_depths.clamp(min=min_depth)
+            max_depths = max_depths.clamp(max=max_depth)
 
         # Project depth values to specified space
         proj_fn = get_projection_fn(projection)
@@ -602,11 +595,11 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         sparse_ranges: tuple[torch.Tensor, torch.Tensor] | None = None
         if affine_invariant and not closed_form:
             sparse_mins, sparse_maxs = utils.masked_minmax(
-                sparses_normed, masks, dims=(1, 2, 3)
+                sparses_normed.view(N, -1), masks.view(N, -1), dim=-1
             )
             sparse_ranges = (
-                sparse_mins.view(-1, 1, 1, 1),
-                sparse_maxs.view(-1, 1, 1, 1),
+                sparse_mins.view(N, 1, 1, 1),
+                sparse_maxs.view(N, 1, 1, 1),
             )
 
         # Set current prediction latents as trainable params
@@ -726,8 +719,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 pred_latent_grad_norms = torch.linalg.norm(
                     pred_latents.grad.view(N, -1), dim=1
                 )  # [N]
-                factors = pred_epsilon_norms / torch.clamp(
-                    pred_latent_grad_norms, min=EPSILON
+                factors = pred_epsilon_norms / pred_latent_grad_norms.clamp(
+                    min=EPSILON
                 )  # [N]
                 factors = factors.view(N, 1, 1, 1)  # [N, 1, 1, 1]
                 # Scaling
@@ -758,6 +751,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 masks=masks,
             )  # [N, 1, H, W]
             # Decode
-            denses_normed = torch.clamp(denses_normed, min=0, max=1)
+            denses_normed = denses_normed.clamp(min=0.0, max=1.0)
             denses = denses_normed * (max_depths - min_depths) + min_depths
         return denses, pred_latents_detached

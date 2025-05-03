@@ -87,20 +87,22 @@ def kld_stdnorm(
 
 
 def masked_minmax(
-    x: torch.Tensor, mask: torch.Tensor, dims: tuple[int, ...]
+    x: torch.Tensor, mask: torch.Tensor, dim: int | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Calculate the minimum and maximum values of tensor x along specified dimensions, but only considering values where mask is True.
 
     Args:
         x (torch.Tensor): Input tensor
         mask (torch.Tensor): Boolean mask tensor with the same shape as x
-        dims (tuple[int, ...]): Dimensions along which to compute the minimum and maximum
+        dim (int | None): Dimension along which to compute the minimum and maximum.
+            If None, computes the global minimum and maximum across all dimensions.
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor]: Tuple containing (min, max) tensors along specified dimensions where mask is True
+        tuple[torch.Tensor, torch.Tensor]: Tuple containing (min, max) tensors along specified dimension where mask is True
 
     Raises:
         ValueError: If x and mask have different shapes
+        ValueError: If no valid values are found in mask for some positions
     """  # noqa: E501
     if x.shape != mask.shape:
         raise ValueError(
@@ -117,9 +119,13 @@ def masked_minmax(
         mask, x, torch.tensor(float("-inf"), device=x.device, dtype=x.dtype)
     )
 
-    # Compute minimum and maximum along specified dimensions
-    min_vals = torch.amin(masked_x_min, dim=dims)
-    max_vals = torch.amax(masked_x_max, dim=dims)
+    # Compute minimum and maximum along specified dim
+    if dim is None:
+        min_vals = masked_x_min.min()
+        max_vals = masked_x_max.max()
+    else:
+        min_vals = masked_x_min.amin(dim=dim)
+        max_vals = masked_x_max.amax(dim=dim)
 
     # Check if any value in the results is infinity
     # (meaning no valid values in mask for that position)
