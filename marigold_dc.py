@@ -49,6 +49,84 @@ def get_projection_fn(projection: str) -> Callable[[torch.Tensor], torch.Tensor]
     raise ValueError(f"Unknown projection method: {projection}")
 
 
+def compute_affine_params_batched(
+    affines: torch.Tensor,
+    guides: torch.Tensor,
+    masks: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Computes optimal affine transformation parameters for a batch of depth maps.
+
+    This function calculates the scale and shift parameters needed to transform
+    the network's output depth maps to align with sparse depth measurements.
+    It performs a least-squares optimization to find the best affine parameters
+    that minimize the difference between the transformed depth maps and the guide
+    measurements at valid mask locations.
+
+    The affine transformation is defined as:
+        metric_depth = scale * affine_depth + shift
+
+    The optimal parameters are computed using the following formulas:
+        scale = cov(affine, guide) / var(affine)
+        shift = mean(guide) - scale * mean(affine)
+
+    where cov and var are computed only over valid mask locations.
+
+    Args:
+        affines (torch.Tensor): Batch of depth maps to be transformed, shape [N, 1, H, W].
+        guides (torch.Tensor): Batch of target depth measurements, shape [N, 1, H, W].
+        masks (torch.Tensor): Binary masks indicating valid measurements, shape [N, 1, H, W].
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: A tuple containing:
+            - scales (torch.Tensor): Scale parameters for each sample in the batch, shape [N].
+            - shifts (torch.Tensor): Shift parameters for each sample in the batch, shape [N].
+    """  # noqa: E501
+
+    N = affines.shape[0]
+    # Flatten H, W dimensions
+    affines_flat = affines.view(N, -1)  # [N, H*W]
+    guides_flat = guides.view(N, -1)  # [N, H*W]
+    masks_flat = masks.view(N, -1)  # [N, H*W]
+
+    # Count valid points for each batch element
+    num_valid = masks_flat.sum(dim=1, keepdim=True)  # [N, 1]
+
+    # Check if any mask has no valid points
+    if torch.any(num_valid == 0):
+        raise ValueError("At least one mask in the batch has no valid points")
+
+    # Use num_valid directly since we've verified no zeros exist
+    num_valid_safe = num_valid
+
+    # Calculate sums with mask applied (points outside mask become 0)
+    affines_masked_sum = torch.sum(
+        affines_flat * masks_flat, dim=1, keepdim=True
+    )  # [N, 1]
+    guides_masked_sum = torch.sum(
+        guides_flat * masks_flat, dim=1, keepdim=True
+    )  # [N, 1]
+
+    # Calculate mean of masked elements
+    affines_mean = affines_masked_sum / num_valid_safe  # [N, 1]
+    guides_mean = guides_masked_sum / num_valid_safe  # [N, 1]
+
+    # Center the masked elements
+    affines_centered = (affines_flat - affines_mean) * masks_flat  # [N, H*W]
+    guides_centered = (guides_flat - guides_mean) * masks_flat  # [N, H*W]
+
+    # Calculate variance and covariance terms (considering only masked elements)
+    vars_ = torch.sum(affines_centered.pow(2), dim=1, keepdim=True)  # [N, 1]
+    covs = torch.sum(affines_centered * guides_centered, dim=1, keepdim=True)  # [N, 1]
+
+    # Calculate scale and shift
+    scales = covs / (vars_ + EPSILON)  # [N, 1]
+    shifts = guides_mean - scales * affines_mean  # [N, 1]
+
+    # Reshape from [N, 1] to [N] and return
+    return scales.squeeze(1), shifts.squeeze(1)
+
+
 def compute_affine_params(
     affine: torch.Tensor, guide: torch.Tensor, mask: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -60,29 +138,29 @@ def compute_affine_params(
     The computation follows a closed-form solution for linear regression.
 
     Args:
-        affine: Affine depth map tensor with shape compatible with the mask.
+        affine (torch.Tensor): Affine depth map tensor with shape compatible with the mask.
                Contains predicted depth values that need to be transformed.
-        guide: Guide depth measurements tensor with shape compatible with the mask.
+        guide (torch.Tensor): Guide depth measurements tensor with shape compatible with the mask.
                Contains target depth values at measured points.
-        mask: Binary mask tensor indicating valid guide depth measurements (True/1 at valid points).
+        mask (torch.Tensor): Binary mask tensor indicating valid guide depth measurements (True/1 at valid points).
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: A tuple containing:
-            - scale: The optimal scaling factor to apply to affine predictions
-            - shift: The optimal shift value to apply after scaling
+            - scale (torch.Tensor): The optimal scaling factor to apply to the affine predictions.
+            - shift (torch.Tensor): The optimal shift value to apply after scaling.
 
     Note:
-        The resulting affine transformation can be applied as: affine_transformed = scale * guide + shift
+        The resulting affine transformation can be applied as: transformed_depth = scale * affine + shift
         A small epsilon value (EPSILON) is added to the denominator to prevent division by zero.
     """  # noqa: E501
     affine_masked = affine[mask]
     guide_masked = guide[mask]
     affine_mean = affine_masked.mean()
     guide_mean = guide_masked.mean()
-    scale = ((guide_masked - guide_mean) * (affine_masked - affine_mean)).sum() / (
-        (guide_masked - guide_mean).pow(2).sum() + EPSILON
+    scale = ((affine_masked - affine_mean) * (guide_masked - guide_mean)).sum() / (
+        (affine_masked - affine_mean).pow(2).sum() + EPSILON
     )
-    shift = affine_mean - scale * guide_mean
+    shift = guide_mean - scale * affine_mean
     return scale, shift
 
 
@@ -259,24 +337,17 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         if not closed_form:
             assert affine_params is not None
             scales, shifts = affine_params
-            sparses_min, sparses_max = utils.masked_minmax(
+            mins, maxs = utils.masked_minmax(
                 guides.view(N, -1), masks.view(N, -1), dim=-1
             )
-            sparses_min = sparses_min.view(N, 1, 1, 1)
-            sparses_max = sparses_max.view(N, 1, 1, 1)
-            return (scales**2) * (sparses_max - sparses_min) * affines + (
-                shifts**2
-            ) * sparses_min
+            mins = mins.view(N, 1, 1, 1)
+            maxs = maxs.view(N, 1, 1, 1)
+            return (scales**2) * (maxs - mins) * affines + (shifts**2) * mins
         else:
-            scale_list: list[torch.Tensor] = []
-            shift_list: list[torch.Tensor] = []
-            for m, s, d in zip(masks, guides, affines, strict=True):
-                scale, shift = compute_affine_params(d, s, m)
-                scale_list.append(scale)
-                shift_list.append(shift)
-            scale_tensor = torch.stack(scale_list).view(N, 1, 1, 1)
-            shift_tensor = torch.stack(shift_list).view(N, 1, 1, 1)
-            return affines * scale_tensor + shift_tensor
+            scales, shifts = compute_affine_params_batched(affines, guides, masks)
+            scales = scales.view(N, 1, 1, 1)
+            shifts = shifts.view(N, 1, 1, 1)
+            return (scales * affines) + shifts
 
     def _latent_to_affine(
         self,
