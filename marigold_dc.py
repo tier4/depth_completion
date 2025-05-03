@@ -552,8 +552,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         masks = sparses > 0
         if norm == "minmax":
             min_depths, max_depths = utils.masked_minmax(sparses, masks, dims=(1, 2, 3))
-            min_depths = min_depths.view(-1, 1, 1, 1)
-            max_depths = max_depths.view(-1, 1, 1, 1)
+            min_depths = min_depths.view(N, 1, 1, 1)
+            max_depths = max_depths.view(N, 1, 1, 1)
         elif norm == "percentile":
             ranges = torch.stack(
                 [
@@ -564,8 +564,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     for s, m in zip(sparses, masks, strict=True)
                 ]
             )  # [N, 2]
-            min_depths = ranges[:, 0].view(-1, 1, 1, 1)
-            max_depths = ranges[:, 1].view(-1, 1, 1, 1)
+            min_depths = ranges[:, 0].view(N, 1, 1, 1)
+            max_depths = ranges[:, 1].view(N, 1, 1, 1)
         elif norm == "const":
             min_depths = torch.full((N, 1, 1, 1), min_depth, device=sparses.device)
             max_depths = torch.full((N, 1, 1, 1), max_depth, device=sparses.device)
@@ -582,13 +582,18 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             min_depths = torch.clamp(min_depths, min=min_depth, max=max_depth)
             max_depths = torch.clamp(max_depths, min=min_depth, max=max_depth)
 
-        # Normalize sparse depth maps
+        # Project depth values to specified space
         proj_fn = get_projection_fn(projection)
-        min_depths_proj, max_depths_proj = proj_fn(min_depths), proj_fn(max_depths)
+        min_depths_proj = proj_fn(min_depths)
+        max_depths_proj = proj_fn(max_depths)
         sparses_clamped_proj = proj_fn(sparses_clamped)
+
+        # Inverse projected depth values if necessary
         if inv:
             min_depths_proj, max_depths_proj = 1 / max_depths_proj, 1 / min_depths_proj
             sparses_clamped_proj = 1 / sparses_clamped_proj
+
+        # Normalize sparse depth maps to [0, 1]
         sparses_normed = (sparses_clamped_proj - min_depths_proj) / (
             max_depths_proj - min_depths_proj
         )
