@@ -437,21 +437,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 - Prediction latents with dimensions [N, 4, EH, EW] that can be used for temporal consistency
                   in subsequent frames
         """  # noqa: E501
-        generator = torch.Generator(device=self.device).manual_seed(seed)
-
-        # Create empty text embedding if not created
-        if self.empty_text_embedding is None:
-            with torch.no_grad():
-                text_inputs = self.tokenizer(
-                    "",
-                    padding="do_not_pad",
-                    max_length=self.tokenizer.model_max_length,
-                    truncation=True,
-                    return_tensors="pt",
-                )
-                self.empty_text_embedding: torch.Tensor = self.text_encoder(
-                    text_inputs.input_ids.to(self.device)
-                )[0]
 
         # Check input shapes
         if (
@@ -510,28 +495,44 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 if func not in SUPPORTED_LOSS_FUNCS:
                     raise ValueError(f"Unknown loss function: {func}")
 
-        # Tile empty text conditioning
-        batch_empty_text_embedding = self.empty_text_embedding.repeat(N, 1, 1)
-
-        # Create common prediction latents
-        pred_latents_common = torch.randn(
-            (N, 4, EH, EW),
-            device=imgs.device,
-            dtype=self.dtype,
-            generator=generator,
-        )  # [N, 4, EH, EW]
-
-        # Preprocess input images
-        imgs_resized, padding, orig_res = self.image_processor.preprocess(
-            imgs,
-            processing_resolution=resolution,
-            device=self.device,
-            dtype=self.dtype,
-        )  # [N, C, PPH, PPW]
-        orig_res = cast(tuple[int, int], orig_res)
-
-        # Get latent encodings
         with torch.no_grad():
+            # Create random generator
+            generator = torch.Generator(device=self.device).manual_seed(seed)
+
+            # Create empty text embedding if not created
+            if self.empty_text_embedding is None:
+                text_inputs = self.tokenizer(
+                    "",
+                    padding="do_not_pad",
+                    max_length=self.tokenizer.model_max_length,
+                    truncation=True,
+                    return_tensors="pt",
+                )
+                self.empty_text_embedding: torch.Tensor = self.text_encoder(
+                    text_inputs.input_ids.to(self.device)
+                )[0]
+
+            # Tile empty text conditioning
+            batch_empty_text_embedding = self.empty_text_embedding.repeat(N, 1, 1)
+
+            # Create common prediction latents
+            pred_latents_common = torch.randn(
+                (N, 4, EH, EW),
+                device=imgs.device,
+                dtype=self.dtype,
+                generator=generator,
+            )  # [N, 4, EH, EW]
+
+            # Preprocess input images
+            imgs_resized, padding, orig_res = self.image_processor.preprocess(
+                imgs,
+                processing_resolution=resolution,
+                device=self.device,
+                dtype=self.dtype,
+            )  # [N, C, PPH, PPW]
+            orig_res = cast(tuple[int, int], orig_res)
+
+            # Get latent encodings
             img_latents, _ = self.prepare_latents(
                 imgs_resized, None, generator, 1, N
             )  # [N, 4, EH, EW], [N, 4, EH, EW]
@@ -542,65 +543,68 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             else:
                 pred_latents = pred_latents_common
 
-        # Calculate min & max depth values for each sample in the batch
-        masks = sparses > 0
-        if norm == "minmax":
-            min_depths, max_depths = utils.masked_minmax(
-                sparses.view(N, -1), masks.view(N, -1), dim=-1
+            # Calculate min & max depth values for each sample in the batch
+            masks = sparses > 0
+            if norm == "minmax":
+                min_depths, max_depths = utils.masked_minmax(
+                    sparses.view(N, -1), masks.view(N, -1), dim=-1
+                )
+                min_depths = min_depths.view(N, 1, 1, 1)
+                max_depths = max_depths.view(N, 1, 1, 1)
+            elif norm == "percentile":
+                p = torch.tensor(percentile, device=sparses.device)
+                ranges = torch.stack(
+                    [
+                        torch.quantile(
+                            s[m],
+                            p,
+                        )
+                        for s, m in zip(sparses, masks, strict=True)
+                    ]
+                )  # [N, 2]
+                min_depths = ranges[:, 0].view(N, 1, 1, 1)
+                max_depths = ranges[:, 1].view(N, 1, 1, 1)
+            elif norm == "const":
+                min_depths = torch.full((N, 1, 1, 1), min_depth, device=sparses.device)
+                max_depths = torch.full((N, 1, 1, 1), max_depth, device=sparses.device)
+            else:
+                raise ValueError(f"Unknown norm method: {norm}")
+
+            # Clamp depth values to [min_depth, max_depth]
+            sparses_clamped = sparses.clamp(min=min_depths, max=max_depths)
+            if norm in ["minmax", "percentile"]:
+                min_depths = min_depths.clamp(min=min_depth)
+                max_depths = max_depths.clamp(max=max_depth)
+
+            # Project depth values to specified space
+            proj_fn = get_projection_fn(projection)
+            min_depths_proj = proj_fn(min_depths)
+            max_depths_proj = proj_fn(max_depths)
+            sparses_clamped_proj = proj_fn(sparses_clamped)
+
+            # Inverse projected depth values if necessary
+            if inv:
+                min_depths_proj, max_depths_proj = (
+                    1 / max_depths_proj,
+                    1 / min_depths_proj,
+                )
+                sparses_clamped_proj = 1 / sparses_clamped_proj
+
+            # Normalize sparse depth maps to [0, 1]
+            sparses_normed = (sparses_clamped_proj - min_depths_proj) / (
+                max_depths_proj - min_depths_proj
             )
-            min_depths = min_depths.view(N, 1, 1, 1)
-            max_depths = max_depths.view(N, 1, 1, 1)
-        elif norm == "percentile":
-            p = torch.tensor(percentile, device=sparses.device)
-            ranges = torch.stack(
-                [
-                    torch.quantile(
-                        s[m],
-                        torch.tensor(percentile, device=sparses.device),
-                    )
-                    for s, m in zip(sparses, masks, strict=True)
-                ]
-            )  # [N, 2]
-            min_depths = ranges[:, 0].view(N, 1, 1, 1)
-            max_depths = ranges[:, 1].view(N, 1, 1, 1)
-        elif norm == "const":
-            min_depths = torch.full((N, 1, 1, 1), min_depth, device=sparses.device)
-            max_depths = torch.full((N, 1, 1, 1), max_depth, device=sparses.device)
-        else:
-            raise ValueError(f"Unknown norm method: {norm}")
 
-        # Clamp depth values to [min_depth, max_depth]
-        sparses_clamped = sparses.clamp(min=min_depths, max=max_depths)
-        if norm in ["minmax", "percentile"]:
-            min_depths = min_depths.clamp(min=min_depth)
-            max_depths = max_depths.clamp(max=max_depth)
-
-        # Project depth values to specified space
-        proj_fn = get_projection_fn(projection)
-        min_depths_proj = proj_fn(min_depths)
-        max_depths_proj = proj_fn(max_depths)
-        sparses_clamped_proj = proj_fn(sparses_clamped)
-
-        # Inverse projected depth values if necessary
-        if inv:
-            min_depths_proj, max_depths_proj = 1 / max_depths_proj, 1 / min_depths_proj
-            sparses_clamped_proj = 1 / sparses_clamped_proj
-
-        # Normalize sparse depth maps to [0, 1]
-        sparses_normed = (sparses_clamped_proj - min_depths_proj) / (
-            max_depths_proj - min_depths_proj
-        )
-
-        # Calculate sparse ranges
-        sparse_ranges: tuple[torch.Tensor, torch.Tensor] | None = None
-        if affine_invariant and not closed_form:
-            sparse_mins, sparse_maxs = utils.masked_minmax(
-                sparses_normed.view(N, -1), masks.view(N, -1), dim=-1
-            )
-            sparse_ranges = (
-                sparse_mins.view(N, 1, 1, 1),
-                sparse_maxs.view(N, 1, 1, 1),
-            )
+            # Calculate sparse ranges
+            sparse_ranges: tuple[torch.Tensor, torch.Tensor] | None = None
+            if affine_invariant and not closed_form:
+                sparse_mins, sparse_maxs = utils.masked_minmax(
+                    sparses_normed.view(N, -1), masks.view(N, -1), dim=-1
+                )
+                sparse_ranges = (
+                    sparse_mins.view(N, 1, 1, 1),
+                    sparse_maxs.view(N, 1, 1, 1),
+                )
 
         # Set current prediction latents as trainable params
         pred_latents = torch.nn.Parameter(pred_latents)  # [N, 4, EH, EW]
@@ -677,8 +681,11 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 sparses=sparses_normed,
                 masks=masks,
                 closed_form=closed_form,
+            ).clamp(
+                min=0.0, max=1.0
             )  # [N, 1, H, W]
-            denses_normed = denses_normed.clamp(min=0.0, max=1.0)
+
+            # Convert depth space
             if projection != "linear":
                 denses_normed = denses_normed * (max_depths - min_depths) + min_depths
                 denses_normed = get_projection_fn(projection)(denses_normed)
@@ -694,6 +701,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     max_depths_proj - min_depths_proj
                 )
 
+            # Compute loss
             losses = compute_loss(
                 denses_normed, sparses_normed, masks, loss_funcs, image=imgs
             )
@@ -703,7 +711,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             if kld:
                 kld_losses = utils.kld_stdnorm(
                     pred_latents, reduction="none", mode=kld_mode
-                ).reshape(-1, 1, 1, 1)
+                ).reshape(N, 1, 1, 1)
                 losses = losses + kld_weight * kld_losses
 
             # Backprop
