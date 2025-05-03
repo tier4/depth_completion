@@ -361,7 +361,6 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         beta: float = 0.9,
         steps: int = 50,
         resolution: int = 768,
-        affine_invariant: bool = True,
         closed_form: bool = False,
         opt: str = "adam",
         lr: tuple[float, float] | None = None,
@@ -410,15 +409,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 Higher values yield better quality but result in slower inference. Defaults to 50.
             resolution (int, optional): The resolution for internal processing.
                 Higher values yield better quality but consume more memory. Defaults to 768.
-            affine_invariant (bool, optional): Indicates whether to use affine invariant depth completion.
-                When set to True, the model applies affine transformations to manage arbitrary depth scales
-                and shifts between the model's internal representation and the input sparse depth.
-                This allows the model to function with different depth sensors and units without retraining.
-                The model will automatically estimate the appropriate scale and shift parameters
-                to align its predictions with the input sparse measurements. Defaults to True.
             closed_form (bool, optional): Whether to use closed-form solution for affine parameters.
                 When True, computes optimal affine parameters analytically rather than through optimization.
-                Only applicable when affine_invariant is True. Defaults to False.
+                Defaults to False.
             opt (str, optional): The optimizer to use ("adam", "sgd", or "adagrad").
                 Defaults to "adam".
             lr (tuple[float, float] | None, optional): Learning rates for (latent, scaling).
@@ -617,7 +610,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 # shift
                 torch.nn.Parameter(torch.zeros(N, 1, 1, 1, device=self.device)),
             )
-            if affine_invariant and not closed_form
+            if not closed_form
             else None
         )
 

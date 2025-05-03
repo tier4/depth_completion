@@ -290,13 +290,6 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     show_default=True,
 )
 @click.option(
-    "--affine-invariant",
-    type=bool,
-    default=True,
-    help="Whether to inference affine invariant depth completion.",
-    show_default=True,
-)
-@click.option(
     "--closed-form",
     type=bool,
     default=False,
@@ -356,7 +349,6 @@ def main(
     kld_weight: float,
     kld_mode: str,
     use_segmask: bool,
-    affine_invariant: bool,
     closed_form: bool,
     projection: str,
     inv: bool,
@@ -644,7 +636,6 @@ def main(
                 kld=kld,
                 kld_mode=kld_mode,
                 kld_weight=kld_weight,
-                affine_invariant=affine_invariant,
                 closed_form=closed_form,
             )
             batch_denses = cast(torch.Tensor, batch_denses)
