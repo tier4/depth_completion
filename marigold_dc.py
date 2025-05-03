@@ -49,7 +49,7 @@ def get_projection_fn(projection: str) -> Callable[[torch.Tensor], torch.Tensor]
     raise ValueError(f"Unknown projection method: {projection}")
 
 
-def compute_affine_params_batched(
+def compute_affine_params(
     affines: torch.Tensor,
     guides: torch.Tensor,
     masks: torch.Tensor,
@@ -125,43 +125,6 @@ def compute_affine_params_batched(
 
     # Reshape from [N, 1] to [N] and return
     return scales.squeeze(1), shifts.squeeze(1)
-
-
-def compute_affine_params(
-    affine: torch.Tensor, guide: torch.Tensor, mask: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Computes optimal affine transformation parameters to align affine depth maps with guide measurements.
-
-    This function calculates the scale and shift parameters that minimize the least squares error
-    between the affine depth maps and guide depth measurements at valid measurement points.
-    The computation follows a closed-form solution for linear regression.
-
-    Args:
-        affine (torch.Tensor): Affine depth map tensor with shape compatible with the mask.
-               Contains predicted depth values that need to be transformed.
-        guide (torch.Tensor): Guide depth measurements tensor with shape compatible with the mask.
-               Contains target depth values at measured points.
-        mask (torch.Tensor): Binary mask tensor indicating valid guide depth measurements (True/1 at valid points).
-
-    Returns:
-        tuple[torch.Tensor, torch.Tensor]: A tuple containing:
-            - scale (torch.Tensor): The optimal scaling factor to apply to the affine predictions.
-            - shift (torch.Tensor): The optimal shift value to apply after scaling.
-
-    Note:
-        The resulting affine transformation can be applied as: transformed_depth = scale * affine + shift
-        A small epsilon value (EPSILON) is added to the denominator to prevent division by zero.
-    """  # noqa: E501
-    affine_masked = affine[mask]
-    guide_masked = guide[mask]
-    affine_mean = affine_masked.mean()
-    guide_mean = guide_masked.mean()
-    scale = ((affine_masked - affine_mean) * (guide_masked - guide_mean)).sum() / (
-        (affine_masked - affine_mean).pow(2).sum() + EPSILON
-    )
-    shift = guide_mean - scale * affine_mean
-    return scale, shift
 
 
 def compute_loss(
@@ -344,7 +307,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             maxs = maxs.view(N, 1, 1, 1)
             return (scales**2) * (maxs - mins) * affines + (shifts**2) * mins
         else:
-            scales, shifts = compute_affine_params_batched(affines, guides, masks)
+            scales, shifts = compute_affine_params(affines, guides, masks)
             scales = scales.view(N, 1, 1, 1)
             shifts = shifts.view(N, 1, 1, 1)
             return (scales * affines) + shifts
