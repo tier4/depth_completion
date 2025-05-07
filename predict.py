@@ -6,7 +6,7 @@ from typing import Any, cast
 import click
 import torch
 import tqdm
-from diffusers import AutoencoderTiny, DDIMScheduler
+from diffusers import AutoencoderTiny, DDIMScheduler, LCMScheduler
 from loguru import logger
 
 import utils
@@ -36,7 +36,9 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     default="original",
     help="Marigold model to use for depth completion. "
     "original - The original Marigold model. "
-    "lcm - The LCM-based Marigold model.",
+    "lcm - The LCM-based Marigold model."
+    "If lcm is selected, trainable latents are not supported "
+    "(i.e. force --train-latents=False)",
     show_default=True,
 )
 @click.option(
@@ -294,7 +296,8 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     type=bool,
     default=False,
     help="Whether to use closed-form solution for affine transformation parameters."
-    "If False, affine transformation parameters are inferred by a neural network. ",
+    "If False, affine transformation parameters are inferred by a neural network. "
+    "When --train-latents=False, this option is forced to True.",
     show_default=True,
 )
 @click.option(
@@ -416,6 +419,24 @@ def main(
         )
         norm = "minmax"
 
+    # NOTE:
+    # LCM-based Marigold model does not support trainable latents
+    if model == "lcm" and train_latents:
+        logger.error(
+            "LCM-based Marigold model does not support trainable latents "
+            "(train_latents=True). "
+            "Falling back to train_latents=False"
+        )
+        train_latents = False
+
+    if not train_latents and not closed_form:
+        logger.error(
+            "When trainable latentes are not used, "
+            "closed-form solution must be enabled. "
+            "Falling back to closed_form=True"
+        )
+        closed_form = True
+
     ############################################################
     # Model initialization
     ############################################################
@@ -448,9 +469,14 @@ def main(
         ).to("cuda")
 
     # Set scheduler
-    pipe.scheduler = DDIMScheduler.from_config(
-        pipe.scheduler.config, timestep_spacing="trailing"
-    )
+    if model == "original":
+        pipe.scheduler = DDIMScheduler.from_config(
+            pipe.scheduler.config, timestep_spacing="trailing"
+        )
+    else:  # model == "lcm"
+        pipe.scheduler = LCMScheduler.from_config(
+            pipe.scheduler.config, timestep_spacing="trailing"
+        )
 
     # Compile model for faster inference
     if compile_graph:

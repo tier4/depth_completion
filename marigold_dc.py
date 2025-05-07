@@ -362,7 +362,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         beta: float = 0.9,
         steps: int = 50,
         resolution: int = 768,
-        closed_form: bool = False,
+        closed_form: bool | None = None,
         opt: str = "adam",
         lr: tuple[float, float] | None = None,
         kld: bool = False,
@@ -405,17 +405,17 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 with dimensions [N, 4, EH, EW] from a prior frame or iteration.
                 This enables temporal consistency when processing video sequences. Defaults to None.
             beta (float, optional): The momentum factor for prediction latents between frames.
-                Must be within the range [0, 1]. Higher values give more weight to new latents,
+                Must be within the range (0, 1). Higher values give more weight to new latents,
                 while lower values retain more information from previous frames. Defaults to 0.9.
             steps (int, optional): The number of denoising steps.
                 Higher values yield better quality but result in slower inference. Defaults to 50.
             resolution (int, optional): The resolution for internal processing.
                 Higher values yield better quality but consume more memory. Defaults to 768.
-            closed_form (bool, optional): Whether to use closed-form solution for affine parameters.
+            closed_form (bool | None, optional): Whether to use closed-form solution for affine parameters.
                 When True, computes optimal affine parameters analytically rather than through optimization.
-                Defaults to False.
-            opt (str, optional): The optimizer to use ("adam", "sgd", or "adagrad").
-                Defaults to "adam".
+                If None, it will be set to the opposite of train_latents. Defaults to None.
+            opt (str, optional): The optimizer to use for latent optimization.
+                Options include "adam", "sgd", or "adagrad". Defaults to "adam".
             lr (tuple[float, float] | None, optional): Learning rates for (latent, scaling).
                 If None, defaults to (0.05, 0.005).
             kld (bool, optional): Indicates whether to apply a KL divergence penalty to
@@ -439,6 +439,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             train_latents (bool, optional): Whether to optimize the latent representations during inference.
                 When False, the model will use the closed-form solution for affine parameters without optimizing latents.
                 Setting to False can speed up inference at the cost of potentially lower quality. Defaults to True.
+                Note: LCM-based Marigold models do not support trainable latents.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor]:
@@ -469,9 +470,15 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     f"{pred_latents_prev.shape}"
                 )
 
-        # If train_latents is False, closed_form is forced to True
-        if not train_latents and not closed_form:
-            closed_form = True
+        # Check closed_form and train_latents
+        if closed_form is None:
+            closed_form = not train_latents
+        elif not closed_form and not train_latents:
+            raise ValueError(
+                "Closed form solution must be enabled when trainable "
+                "latents are not used. Set closed_form=True when "
+                "train_latents=False, or just leave closed_form=None. "
+            )
 
         # Check if beta is in (0, 1)
         if not (0 < beta < 1):
