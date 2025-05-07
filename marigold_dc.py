@@ -397,6 +397,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 accuracy for distant objects. Defaults to False.
             norm (str, optional): The normalization method for input sparse depth maps.
                 Options include "const", "minmax", or "percentile". Defaults to "minmax".
+                Note: When projection="log" or "log10" or inv=True, norm="const" is not allowed.
             percentile (tuple[float, float], optional): The percentile values (min, max) used for depth normalization
                 when norm="percentile". Values should be in the range [0, 1]. For example, (0.01, 0.99) means
                 the depth range is determined by the 1st and 99th percentiles of the sparse depth values.
@@ -413,33 +414,38 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 Higher values yield better quality but consume more memory. Defaults to 768.
             closed_form (bool | None, optional): Whether to use closed-form solution for affine parameters.
                 When True, computes optimal affine parameters analytically rather than through optimization.
-                If None, it will be set to the opposite of train_latents. Defaults to None.
+                If None, it will be set to the opposite of train_latents. When train_latents=False,
+                closed_form must be True. Defaults to None.
             opt (str, optional): The optimizer to use for latent optimization.
                 Options include "adam", "sgd", or "adagrad". Defaults to "adam".
+                This option is ignored when train_latents=False.
             lr (tuple[float, float] | None, optional): Learning rates for (latent, scaling).
                 If None, defaults to (0.05, 0.005).
+                This option is ignored when train_latents=False.
             kld (bool, optional): Indicates whether to apply a KL divergence penalty to
                 keep prediction latents close to N(0,1). Defaults to False.
+                This option is ignored when train_latents=False.
             kld_weight (float, optional): The weight for the KL divergence penalty.
                 Used only when kld is True. Defaults to 0.1.
+                This option is ignored when train_latents=False.
             kld_mode (str, optional): The KL divergence mode. Options include:
                 - "simple": Uses a simplified penalty based on the squared L2 norm of latents.
                   This is the fastest but least accurate approximation of KL divergence.
                 - "strict": Computes the proper forward KL divergence between the latent distribution and N(0,1).
                   This is more accurate but slightly more computationally expensive.
-                Defaults to "simple".
+                Defaults to "simple". This option is ignored when train_latents=False.
             interp_mode (str, optional): The interpolation mode for resizing.
                 Options include "bilinear", "bicubic", etc. Defaults to "bilinear".
             loss_funcs (list[str] | None, optional): The loss functions to use.
                 If None, defaults to ["l1", "l2"]. Supported options include
                 "l1", "l2", "edge", and "smooth". When using "edge" or "smooth",
                 the RGB image is used to guide depth discontinuities. Defaults to None.
+                This option is ignored when train_latents=False.
             seed (int, optional): The random seed for initializing the diffusion process generator and ensuring reproducibility.
                 Defaults to 2024.
             train_latents (bool, optional): Whether to optimize the latent representations during inference.
                 When False, the model will use the closed-form solution for affine parameters without optimizing latents.
                 Setting to False can speed up inference at the cost of potentially lower quality. Defaults to True.
-                Note: LCM-based Marigold models do not support trainable latents.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor]:
