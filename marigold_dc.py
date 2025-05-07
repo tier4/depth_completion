@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from typing import Callable, cast
 
 import diffusers
@@ -370,6 +371,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         interp_mode: str = "bilinear",
         loss_funcs: list[str] | None = None,
         seed: int = 2024,
+        train_latents: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Executes depth completion on a batch of RGB images using sparse depth measurements.
@@ -434,6 +436,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 the RGB image is used to guide depth discontinuities. Defaults to None.
             seed (int, optional): The random seed for initializing the diffusion process generator and ensuring reproducibility.
                 Defaults to 2024.
+            train_latents (bool, optional): Whether to optimize the latent representations during inference.
+                When False, the model will use the closed-form solution for affine parameters without optimizing latents.
+                Setting to False can speed up inference at the cost of potentially lower quality. Defaults to True.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor]:
@@ -463,6 +468,10 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     "Shape of pred_latents_prev must be [N, 4, EH, EW], but got "
                     f"{pred_latents_prev.shape}"
                 )
+
+        # If train_latents is False, closed_form is forced to True
+        if not train_latents and not closed_form:
+            closed_form = True
 
         # Check if beta is in (0, 1)
         if not (0 < beta < 1):
@@ -499,6 +508,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 if func not in SUPPORTED_LOSS_FUNCS:
                     raise ValueError(f"Unknown loss function: {func}")
 
+        # Preprocess inputs
         with torch.no_grad():
             # Create random generator
             generator = torch.Generator(device=self.device).manual_seed(seed)
@@ -599,8 +609,9 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 max_depths_proj - min_depths_proj
             )
 
-        # Set current prediction latents as trainable params
-        pred_latents = torch.nn.Parameter(pred_latents)  # [N, 4, EH, EW]
+        # Set current prediction latents as trainable params if train_latents is True
+        if train_latents:
+            pred_latents = torch.nn.Parameter(pred_latents)
 
         # Set scaling params
         affine_params = (
@@ -610,134 +621,155 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 # shift
                 torch.nn.Parameter(torch.zeros(N, 1, 1, 1, device=self.device)),
             )
-            if not closed_form
+            if not closed_form and train_latents
             else None
         )
 
         # Set up optimizer
-        optimizer: Optimizer
-        param_groups = [
-            {"params": [pred_latents], "lr": lr_latent},
-        ]
-        if affine_params is not None:
-            param_groups.append({"params": list(affine_params), "lr": lr_scaling})
-        if opt == "adam":
-            optimizer = Adam(param_groups)
-        elif opt == "sgd":
-            optimizer = SGD(param_groups)
-        elif opt == "adagrad":
-            optimizer = Adagrad(param_groups)
-        else:
-            raise ValueError(f"Unknown optimizer: {opt}")
+        optimizer: Optimizer | None = None
+        if train_latents:
+            param_groups = [
+                {"params": [pred_latents], "lr": lr_latent},
+            ]
+            if affine_params is not None:
+                param_groups.append({"params": list(affine_params), "lr": lr_scaling})
+            if opt == "adam":
+                optimizer = Adam(param_groups)
+            elif opt == "sgd":
+                optimizer = SGD(param_groups)
+            elif opt == "adagrad":
+                optimizer = Adagrad(param_groups)
+            else:
+                raise ValueError(f"Unknown optimizer: {opt}")
 
         # Denoising loop
-        self.scheduler.set_timesteps(steps, device=self.device)
-        for t in self.scheduler.timesteps:
-            optimizer.zero_grad()
+        # NOTE: grad calculation is needed when train_latents is True
+        context = nullcontext() if train_latents else torch.no_grad()
+        with context:
+            self.scheduler.set_timesteps(steps, device=self.device)
+            for t in self.scheduler.timesteps:
+                if train_latents:
+                    # Clear gradients
+                    assert optimizer is not None
+                    optimizer.zero_grad()
 
-            # Forward pass through the U-Net
-            latents = torch.cat([img_latents, pred_latents], dim=1)  # [N, 8, EH, EW]
-            pred_noises: torch.Tensor = self.unet(
-                latents,
-                t,
-                encoder_hidden_states=batch_empty_text_embedding,
-                return_dict=False,
-            )[
-                0
-            ]  # [N, 4, EH, EW]
+                # Forward pass through the U-Net
+                latents = torch.cat(
+                    [img_latents, pred_latents], dim=1
+                )  # [N, 8, EH, EW]
+                pred_noises: torch.Tensor = self.unet(
+                    latents,
+                    t,
+                    encoder_hidden_states=batch_empty_text_embedding,
+                    return_dict=False,
+                )[
+                    0
+                ]  # [N, 4, EH, EW]
 
-            # Compute noise to later rescale the depth latent gradient
-            with torch.no_grad():
-                a_prod_t = cast(float, self.scheduler.alphas_cumprod[t])
-                b_prod_t = 1 - a_prod_t
-                pred_epsilons = (a_prod_t**0.5) * pred_noises + (
-                    b_prod_t**0.5
-                ) * pred_latents  # [N, 4, EH, EW]
+                if train_latents:
+                    assert optimizer is not None
+                    # Compute noise to later rescale the depth latent gradient
+                    with torch.no_grad():
+                        a_prod_t = cast(float, self.scheduler.alphas_cumprod[t])
+                        b_prod_t = 1 - a_prod_t
+                        pred_epsilons = (a_prod_t**0.5) * pred_noises + (
+                            b_prod_t**0.5
+                        ) * pred_latents  # [N, 4, EH, EW]
 
-            # Preview the final output depth with Tweedie's formula
-            previews = cast(
-                torch.Tensor,
-                self.scheduler.step(
-                    pred_noises, t, pred_latents, generator=generator
-                ).pred_original_sample,
-            )  # [N, 4, EH, EW]
+                    # Preview the final output depth with Tweedie's formula
+                    previews = cast(
+                        torch.Tensor,
+                        self.scheduler.step(
+                            pred_noises, t, pred_latents, generator=generator
+                        ).pred_original_sample,
+                    )  # [N, 4, EH, EW]
 
-            # Predict affine form of dense depth maps
-            denses_affine = self._latent_to_affine(
-                previews,
-                orig_res,
-                padding,
-                interp_mode=interp_mode,
-            )  # [N, 1, H, W]
+                    # Predict affine form of dense depth maps
+                    denses_affine = self._latent_to_affine(
+                        previews,
+                        orig_res,
+                        padding,
+                        interp_mode=interp_mode,
+                    )  # [N, 1, H, W]
 
-            # Predict scaled & shifted dense depth maps
-            denses_normed = self._affine_to_metric(
-                denses_affine,
-                sparses_normed,
-                masks,
-                affine_params=affine_params,
-                closed_form=closed_form,
-            ).clamp(
-                min=0.0, max=1.0
-            )  # [N, 1, H, W]
+                    # Predict scaled & shifted dense depth maps
+                    denses_normed = self._affine_to_metric(
+                        denses_affine,
+                        sparses_normed,
+                        masks,
+                        affine_params=affine_params,
+                        closed_form=closed_form,
+                    ).clamp(
+                        min=0.0, max=1.0
+                    )  # [N, 1, H, W]
 
-            # Convert depth space
-            if projection != "linear":
-                denses_normed = denses_normed * (max_depths - min_depths) + min_depths
-                denses_normed = get_projection_fn(projection)(denses_normed)
-                if inv:
-                    denses_normed = 1 / denses_normed
-                denses_normed = (denses_normed - min_depths_proj) / (
-                    max_depths_proj - min_depths_proj
-                )
-            elif inv:
-                denses_normed = denses_normed * (max_depths - min_depths) + min_depths
-                denses_normed = 1 / denses_normed
-                denses_normed = (denses_normed - min_depths_proj) / (
-                    max_depths_proj - min_depths_proj
-                )
+                    # Convert depth space
+                    if projection != "linear":
+                        denses_normed = (
+                            denses_normed * (max_depths - min_depths) + min_depths
+                        )
+                        denses_normed = get_projection_fn(projection)(denses_normed)
+                        if inv:
+                            denses_normed = 1 / denses_normed
+                        denses_normed = (denses_normed - min_depths_proj) / (
+                            max_depths_proj - min_depths_proj
+                        )
+                    elif inv:
+                        denses_normed = (
+                            denses_normed * (max_depths - min_depths) + min_depths
+                        )
+                        denses_normed = 1 / denses_normed
+                        denses_normed = (denses_normed - min_depths_proj) / (
+                            max_depths_proj - min_depths_proj
+                        )
 
-            # Compute loss
-            losses = compute_loss(
-                denses_normed, sparses_normed, masks, loss_funcs, images=imgs
-            )
+                    # Compute loss
+                    losses = compute_loss(
+                        denses_normed, sparses_normed, masks, loss_funcs, images=imgs
+                    )
 
-            # NOTE: Add KL divergence penalty to keep
-            # the distribution of pred_latent close to N(0,1)
-            if kld:
-                kld_losses = utils.kld_stdnorm(
-                    pred_latents, reduction="none", mode=kld_mode
-                ).reshape(N, 1, 1, 1)
-                losses = losses + kld_weight * kld_losses
+                    # NOTE: Add KL divergence penalty to keep
+                    # the distribution of pred_latent close to N(0,1)
+                    if kld:
+                        kld_losses = utils.kld_stdnorm(
+                            pred_latents, reduction="none", mode=kld_mode
+                        ).reshape(N, 1, 1, 1)
+                        losses = losses + kld_weight * kld_losses
 
-            # Backprop
-            losses.backward(torch.ones_like(losses))  # Preserve batch dimension
+                    # Backprop
+                    losses.backward(torch.ones_like(losses))  # Preserve batch dimension
 
-            # NOTE: Scale grads of pred_latents by the norm of pred_epsilons
-            # for stable optimization
-            with torch.no_grad():
-                assert pred_latents.grad is not None
-                pred_epsilon_norms = torch.linalg.norm(
-                    pred_epsilons.view(N, -1), dim=1
-                )  # [N]
-                pred_latent_grad_norms = torch.linalg.norm(
-                    pred_latents.grad.view(N, -1), dim=1
-                )  # [N]
-                factors = pred_epsilon_norms / pred_latent_grad_norms.clamp(
-                    min=EPSILON
-                )  # [N]
-                factors = factors.view(N, 1, 1, 1)  # [N, 1, 1, 1]
-                # Scaling
-                pred_latents.grad *= factors  # [N, 4, EH, EW]
+                    # NOTE: Scale grads of pred_latents by the norm of pred_epsilons
+                    # for stable optimization
+                    with torch.no_grad():
+                        assert pred_latents.grad is not None
+                        pred_epsilon_norms = torch.linalg.norm(
+                            pred_epsilons.view(N, -1), dim=1
+                        )  # [N]
+                        pred_latent_grad_norms = torch.linalg.norm(
+                            pred_latents.grad.view(N, -1), dim=1
+                        )  # [N]
+                        factors = pred_epsilon_norms / pred_latent_grad_norms.clamp(
+                            min=EPSILON
+                        )  # [N]
+                        factors = factors.view(N, 1, 1, 1)  # [N, 1, 1, 1]
+                        # Scaling
+                        pred_latents.grad *= factors  # [N, 4, EH, EW]
 
-            # Backprop
-            optimizer.step()
+                    # Backprop
+                    optimizer.step()
 
-            # Execute update of the latent with regular denoising diffusion step
-            with torch.no_grad():
-                pred_latents.data = self.scheduler.step(
-                    pred_noises, t, pred_latents, generator=generator
-                ).prev_sample
+                    # Update latent with regular denoising diffusion step
+                    # NOTE: update only data, not grads
+                    with torch.no_grad():
+                        pred_latents.data = self.scheduler.step(
+                            pred_noises, t, pred_latents, generator=generator
+                        ).prev_sample
+                else:
+                    # Update latent with regular denoising diffusion step
+                    pred_latents = self.scheduler.step(
+                        pred_noises, t, pred_latents, generator=generator
+                    ).prev_sample
 
         # Compute final dense depth maps
         with torch.no_grad():

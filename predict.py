@@ -294,8 +294,7 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     type=bool,
     default=False,
     help="Whether to use closed-form solution for affine transformation parameters."
-    "If False, affine transformation parameters are inferred by a neural network. "
-    "This option is valid when --affine-invariant=True.",
+    "If False, affine transformation parameters are inferred by a neural network. ",
     show_default=True,
 )
 @click.option(
@@ -313,6 +312,13 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     type=bool,
     default=False,
     help="Whether to use inverse projection.",
+    show_default=True,
+)
+@click.option(
+    "--train-latents",
+    type=bool,
+    default=True,
+    help="Whether to train the latent variables during denoising diffusion steps.",
     show_default=True,
 )
 def main(
@@ -352,6 +358,7 @@ def main(
     closed_form: bool,
     projection: str,
     inv: bool,
+    train_latents: bool,
 ) -> None:
     # Set log level
     logger.remove()
@@ -545,7 +552,6 @@ def main(
         )
         postfix: dict[str, Any] = {}
         batch_pred_latents_prev: torch.Tensor | None = None
-        pipe.pred_latents_ema = None
         for i in range(0, len(img_paths), batch_size):
             batch_img_paths = img_paths[i : i + batch_size]
             batch_sparse_paths = sparse_paths[i : i + batch_size]
@@ -637,6 +643,7 @@ def main(
                 kld_mode=kld_mode,
                 kld_weight=kld_weight,
                 closed_form=closed_form,
+                train_latents=train_latents,
             )
             batch_denses = cast(torch.Tensor, batch_denses)
             batch_pred_latents = cast(torch.Tensor, batch_pred_latents)
