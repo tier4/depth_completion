@@ -648,9 +648,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         with context:
             self.scheduler.set_timesteps(steps, device=self.device)
             for t in self.scheduler.timesteps:
-                if train_latents:
+                if optimizer is not None:
                     # Clear gradients
-                    assert optimizer is not None
                     optimizer.zero_grad()
 
                 # Forward pass through the U-Net
@@ -666,8 +665,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     0
                 ]  # [N, 4, EH, EW]
 
-                if train_latents:
-                    assert optimizer is not None
+                if optimizer is not None:
                     # Compute noise to later rescale the depth latent gradient
                     with torch.no_grad():
                         a_prod_t = cast(float, self.scheduler.alphas_cumprod[t])
