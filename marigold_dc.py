@@ -402,12 +402,14 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 when norm="percentile". Values should be in the range [0, 1]. For example, (0.01, 0.99) means
                 the depth range is determined by the 1st and 99th percentiles of the sparse depth values.
                 This helps exclude outliers when normalizing depth. Defaults to (0.01, 0.99).
+                This option is valid only when norm="percentile".
             pred_latents_prev (torch.Tensor | None, optional): Previous prediction latents
                 with dimensions [N, 4, EH, EW] from a prior frame or iteration.
                 This enables temporal consistency when processing video sequences. Defaults to None.
             beta (float, optional): The momentum factor for prediction latents between frames.
                 Must be within the range (0, 1). Higher values give more weight to new latents,
                 while lower values retain more information from previous frames. Defaults to 0.9.
+                This option is ignored when pred_latents_prev is None.
             steps (int, optional): The number of denoising steps.
                 Higher values yield better quality but result in slower inference. Defaults to 50.
             resolution (int, optional): The resolution for internal processing.
