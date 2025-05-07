@@ -134,6 +134,10 @@ def compute_loss(
     masks: torch.Tensor,
     loss_funcs: list[str],
     images: torch.Tensor | None = None,
+    kld: bool = False,
+    kld_weight: float = 0.1,
+    kld_mode: str = "simple",
+    pred_latents: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Computes a combined loss between dense depth predictions and sparse depth measurements.
@@ -149,17 +153,29 @@ def compute_loss(
                     - "smooth": Smoothness loss that penalizes depth discontinuities
         images (torch.Tensor | None, optional): RGB or grayscale image tensor of shape [N, C, H, W] where C is 1 or 3.
                Required when using "edge" or "smooth" loss functions. Defaults to None.
+        kld (bool, optional): Whether to add KL divergence penalty to the loss. Defaults to False.
+        kld_weight (float, optional): Weight for the KL divergence term. Defaults to 0.1.
+        kld_mode (str, optional): Mode for KL divergence calculation. Options: "simple", "full". Defaults to "simple".
+        pred_latents (torch.Tensor | None, optional): Prediction latents tensor of shape [N, 4, EH, EW].
+               Required when kld=True.
 
     Returns:
         torch.Tensor: A tensor of shape [N] containing the total loss for each sample in the batch.
+               Each element represents the combined loss for a single sample.
 
     Raises:
         ValueError: If loss_funcs is empty, contains an unsupported loss function,
                    or if images is not provided when required for edge/smooth losses.
+                   Also raised if pred_latents is None when kld=True.
     """  # noqa: E501
     if len(loss_funcs) == 0:
         raise ValueError("loss_funcs must contain at least one loss function")
-    total = torch.zeros(denses.shape[0], device=denses.device)  # [N]
+    if kld and pred_latents is None:
+        raise ValueError(
+            "pred_latents must be provided when kl-divergence constraint is enabled"
+        )
+    N = denses.shape[0]
+    total = torch.zeros(N, device=denses.device)  # [N]
 
     for loss_func in loss_funcs:
         if loss_func == "l1":
@@ -219,6 +235,12 @@ def compute_loss(
 
         else:
             raise ValueError(f"Unknown loss function: {loss_func}")
+
+    # Add KL-divergence constraint
+    if kld:
+        assert pred_latents is not None
+        kld_losses = utils.kld_stdnorm(pred_latents, reduction="none", mode=kld_mode)
+        total += kld_weight * kld_losses
 
     return total  # Returns tensor of shape [N]
 
@@ -348,6 +370,100 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         )  # [N, 1, H, W]
         return affine_resized
 
+    def _latent_to_metric(
+        self,
+        latents: torch.Tensor,
+        guides: torch.Tensor,
+        masks: torch.Tensor,
+        orig_res: tuple[int, int],
+        padding: tuple[int, int],
+        affine_params: tuple[torch.Tensor, torch.Tensor] | None = None,
+        closed_form: bool = False,
+        interp_mode: str = "bilinear",
+    ) -> torch.Tensor:
+        """
+        Converts latent representations directly to metric depth maps in the original image resolution.
+
+        This method combines the functionality of _latent_to_affine and _affine_to_metric to transform
+        the latent representations from the diffusion model into metric depth maps through the following steps:
+        1. Decodes the latent vectors into initial depth predictions
+        2. Removes padding that was added during preprocessing
+        3. Resizes the depth maps to the original image resolution
+        4. Applies affine transformation to align with sparse depth measurements
+
+        Args:
+            latents (torch.Tensor): Batch of latent representations with shape [N, 4, EH, EW],
+                where EH and EW are the encoded height and width.
+            guides (torch.Tensor): Sparse depth measurements with shape [N, 1, H, W] used as
+                guidance for the affine transformation.
+            masks (torch.Tensor): Binary masks with shape [N, 1, H, W] indicating valid
+                sparse depth measurements.
+            orig_res (tuple[int, int]): Original resolution (height, width) of the input images.
+            padding (tuple[int, int]): Padding values (top, left) that were applied during preprocessing.
+            affine_params (tuple[torch.Tensor, torch.Tensor] | None, optional): Pre-computed affine
+                transformation parameters (scales, shifts). If None and closed_form is False,
+                an error will be raised. Defaults to None.
+            closed_form (bool, optional): Whether to compute affine parameters in closed form.
+                If False, affine_params must be provided. Defaults to False.
+            interp_mode (str, optional): Interpolation mode for resizing. Options include
+                "bilinear", "bicubic", etc. Defaults to "bilinear".
+
+        Returns:
+            torch.Tensor: Batch of metric depth maps with shape [N, 1, H, W], where H and W
+                are the original image dimensions.
+        """  # noqa: E501
+        # First convert latents to affine depth maps
+        affines = self._latent_to_affine(
+            latents,
+            orig_res,
+            padding,
+            interp_mode=interp_mode,
+        )  # [N, 1, H, W]
+
+        # Then convert affine depth maps to metric depth maps
+        return self._affine_to_metric(
+            affines,
+            guides,
+            masks,
+            closed_form=closed_form,
+            affine_params=affine_params,
+        )
+
+    def _predict_noise(
+        self,
+        img_latents: torch.Tensor,
+        pred_latents: torch.Tensor,
+        t: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Predicts noise for the denoising diffusion process.
+
+        This method uses the UNet model to predict the noise that should be removed
+        from the latent representation at the current timestep. It concatenates the
+        image latents and prediction latents along the channel dimension before
+        passing them to the UNet.
+
+        Args:
+            img_latents (torch.Tensor): Latent representations of the input images
+                with shape [N, 4, EH, EW], where N is batch size and EH, EW are
+                encoded height and width.
+            pred_latents (torch.Tensor): Current prediction latents at timestep t
+                with shape [N, 4, EH, EW].
+            t (torch.Tensor): Current timestep in the diffusion process.
+
+        Returns:
+            torch.Tensor: Predicted noise with shape [N, 4, EH, EW] to be used
+                in the denoising step.
+        """
+        N = img_latents.shape[0]
+        latents = torch.cat([img_latents, pred_latents], dim=1)
+        return self.unet(
+            latents,
+            t,
+            encoder_hidden_states=self.empty_text_embedding.repeat(N, 1, 1),
+            return_dict=False,
+        )[0]
+
     def __call__(
         self,
         imgs: torch.Tensor,
@@ -372,6 +488,8 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
         loss_funcs: list[str] | None = None,
         seed: int = 2024,
         train_latents: bool = True,
+        train_method: str = "per-step",
+        train_steps: int = 10,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Executes depth completion on a batch of RGB images using sparse depth measurements.
@@ -448,6 +566,12 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             train_latents (bool, optional): Whether to optimize the latent representations during inference.
                 When False, the model will use the closed-form solution for affine parameters without optimizing latents.
                 Setting to False can speed up inference at the cost of potentially lower quality. Defaults to True.
+            train_method (str, optional): The method for training latents. Options include:
+                - "per-step": Optimize latents at each denoising step.
+                - "per-input": Optimize latents after the full denoising process.
+                Defaults to "per-step". This option is ignored when train_latents=False.
+            train_steps (int, optional): The number of optimization steps when train_method="per-input".
+                Must be > 0. Defaults to 10. This option is ignored when train_method="per-step".
 
         Returns:
             tuple[torch.Tensor, torch.Tensor]:
@@ -485,7 +609,15 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             raise ValueError(
                 "Closed form solution must be enabled when trainable "
                 "latents are not used. Set closed_form=True when "
-                "train_latents=False, or just leave closed_form=None. "
+                "train_latents=False, or just leave closed_form=None"
+            )
+
+        # Check train_method
+        if train_method not in ["per-step", "per-input"]:
+            raise ValueError(f"Unknown train_method: {train_method}")
+        if train_method == "per-input" and train_steps <= 0:
+            raise ValueError(
+                "train_steps must be > 0 when per-input training is enabled"
             )
 
         # Check if beta is in (0, 1)
@@ -541,15 +673,14 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                     text_inputs.input_ids.to(self.device)
                 )[0]
 
-            # Tile empty text conditioning
-            batch_empty_text_embedding = self.empty_text_embedding.repeat(N, 1, 1)
-
             # Create common prediction latents
             pred_latents_common = torch.randn(
-                (N, 4, EH, EW),
+                (1, 4, EH, EW),
                 device=imgs.device,
                 dtype=self.dtype,
                 generator=generator,
+            ).repeat(
+                N, 1, 1, 1
             )  # [N, 4, EH, EW]
 
             # Preprocess input images
@@ -625,7 +756,7 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
             )
 
         # Set current prediction latents as trainable params if train_latents is True
-        if train_latents:
+        if train_latents and train_method == "per-step":
             pred_latents = torch.nn.Parameter(pred_latents)
 
         # Set scaling params
@@ -658,29 +789,26 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                 raise ValueError(f"Unknown optimizer: {opt}")
 
         # Denoising loop
-        # NOTE: grad calculation is needed when train_latents is True
-        context = nullcontext() if train_latents else torch.no_grad()
+        # NOTE: grad calculation is needed when
+        # per-step training is enabled
+        context = (
+            nullcontext()
+            if (train_latents and train_method == "per-step")
+            else torch.no_grad()
+        )
         with context:
             self.scheduler.set_timesteps(steps, device=self.device)
             for t in self.scheduler.timesteps:
-                if optimizer is not None:
+                if optimizer is not None and train_method == "per-step":
                     # Clear gradients
                     optimizer.zero_grad()
 
-                # Forward pass through the U-Net
-                latents = torch.cat(
-                    [img_latents, pred_latents], dim=1
-                )  # [N, 8, EH, EW]
-                pred_noises: torch.Tensor = self.unet(
-                    latents,
-                    t,
-                    encoder_hidden_states=batch_empty_text_embedding,
-                    return_dict=False,
-                )[
-                    0
-                ]  # [N, 4, EH, EW]
+                # Predict noise
+                pred_noises = self._predict_noise(
+                    img_latents, pred_latents, t
+                )  # [N, 4, EH, EW]
 
-                if optimizer is not None:
+                if optimizer is not None and train_method == "per-step":
                     # Compute noise to later rescale the depth latent gradient
                     with torch.no_grad():
                         a_prod_t = cast(float, self.scheduler.alphas_cumprod[t])
@@ -697,21 +825,16 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                         ).pred_original_sample,
                     )  # [N, 4, EH, EW]
 
-                    # Predict affine form of dense depth maps
-                    denses_affine = self._latent_to_affine(
+                    # Predict dense depth maps
+                    denses_normed = self._latent_to_metric(
                         previews,
-                        orig_res,
-                        padding,
-                        interp_mode=interp_mode,
-                    )  # [N, 1, H, W]
-
-                    # Predict scaled & shifted dense depth maps
-                    denses_normed = self._affine_to_metric(
-                        denses_affine,
                         sparses_normed,
                         masks,
+                        orig_res,
+                        padding,
                         affine_params=affine_params,
                         closed_form=closed_form,
+                        interp_mode=interp_mode,
                     ).clamp(
                         min=0.0, max=1.0
                     )  # [N, 1, H, W]
@@ -738,19 +861,20 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
 
                     # Compute loss
                     losses = compute_loss(
-                        denses_normed, sparses_normed, masks, loss_funcs, images=imgs
+                        denses_normed,
+                        sparses_normed,
+                        masks,
+                        loss_funcs,
+                        images=imgs,
+                        kld=kld,
+                        kld_weight=kld_weight,
+                        kld_mode=kld_mode,
+                        pred_latents=pred_latents,
                     )
 
-                    # NOTE: Add KL divergence penalty to keep
-                    # the distribution of pred_latent close to N(0,1)
-                    if kld:
-                        kld_losses = utils.kld_stdnorm(
-                            pred_latents, reduction="none", mode=kld_mode
-                        ).reshape(N, 1, 1, 1)
-                        losses = losses + kld_weight * kld_losses
-
                     # Backprop
-                    losses.backward(torch.ones_like(losses))  # Preserve batch dimension
+                    # NOTE: Preserve batch dimension
+                    losses.backward(torch.ones_like(losses))
 
                     # NOTE: Scale grads of pred_latents by the norm of pred_epsilons
                     # for stable optimization
@@ -784,23 +908,78 @@ class MarigoldDepthCompletionPipeline(MarigoldDepthPipeline):
                         pred_noises, t, pred_latents, generator=generator
                     ).prev_sample
 
+        # Per-input training
+        if optimizer is not None and train_method == "per-input":
+            pred_latents = torch.nn.Parameter(pred_latents)
+            for _ in range(train_steps):
+                # Clear gradients
+                optimizer.zero_grad()
+
+                # Predict dense depth maps
+                denses_normed = self._latent_to_metric(
+                    pred_latents,
+                    sparses_normed,
+                    masks,
+                    orig_res,
+                    padding,
+                    affine_params=affine_params,
+                    closed_form=closed_form,
+                    interp_mode=interp_mode,
+                )
+
+                # Convert depth space
+                if projection != "linear":
+                    denses_normed = (
+                        denses_normed * (max_depths - min_depths) + min_depths
+                    )
+                    denses_normed = get_projection_fn(projection)(denses_normed)
+                    if inv:
+                        denses_normed = 1 / denses_normed
+                    denses_normed = (denses_normed - min_depths_proj) / (
+                        max_depths_proj - min_depths_proj
+                    )
+                elif inv:
+                    denses_normed = (
+                        denses_normed * (max_depths - min_depths) + min_depths
+                    )
+                    denses_normed = 1 / denses_normed
+                    denses_normed = (denses_normed - min_depths_proj) / (
+                        max_depths_proj - min_depths_proj
+                    )
+
+                # Compute loss
+                losses = compute_loss(
+                    denses_normed,
+                    sparses_normed,
+                    masks,
+                    loss_funcs,
+                    images=imgs,
+                    kld=kld,
+                    kld_weight=kld_weight,
+                    kld_mode=kld_mode,
+                    pred_latents=pred_latents,
+                )
+
+                # Backprop
+                losses.backward(torch.ones_like(losses))
+
+                # Update latent
+                optimizer.step()
+
         # Compute final dense depth maps
         with torch.no_grad():
             pred_latents_detached = pred_latents.detach()
-            denses_affine = self._latent_to_affine(
+            denses_normed = self._latent_to_metric(
                 pred_latents_detached,
-                orig_res,
-                padding,
-                interp_mode=interp_mode,
-            )  # [N, 1, H, W]
-            denses_normed = self._affine_to_metric(
-                denses_affine,
                 sparses_normed,
                 masks,
+                orig_res,
+                padding,
                 affine_params=affine_params,
                 closed_form=closed_form,
+                interp_mode=interp_mode,
+            ).clamp(
+                min=0.0, max=1.0
             )  # [N, 1, H, W]
-            # Decode
-            denses_normed = denses_normed.clamp(min=0.0, max=1.0)
             denses = denses_normed * (max_depths - min_depths) + min_depths
         return denses, pred_latents_detached

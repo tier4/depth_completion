@@ -324,6 +324,23 @@ torch.set_float32_matmul_precision("high")  # NOTE: Optimize fp32 arithmetic
     help="Whether to train the latent variables during denoising diffusion steps.",
     show_default=True,
 )
+@click.option(
+    "--train-method",
+    type=click.Choice(["per-step", "per-input"]),
+    default="per-step",
+    help="Training method for depth completion. "
+    "per-step - Train latent variables per denoising step. "
+    "per-input - Train latent variables after the full denoising process. ",
+    show_default=True,
+)
+@click.option(
+    "--train-steps",
+    type=click.IntRange(min=1),
+    default=10,
+    help="Number of steps to train the latent variables. "
+    "Used when --train-method=per-input.",
+    show_default=True,
+)
 def main(
     src_root: Path,
     dst_root: Path,
@@ -362,6 +379,8 @@ def main(
     projection: str,
     inv: bool,
     train_latents: bool,
+    train_method: str,
+    train_steps: int,
 ) -> None:
     # Set log level
     logger.remove()
@@ -670,6 +689,8 @@ def main(
                 kld_weight=kld_weight,
                 closed_form=closed_form,
                 train_latents=train_latents,
+                train_method=train_method,
+                train_steps=train_steps,
             )
             batch_denses = cast(torch.Tensor, batch_denses)
             batch_pred_latents = cast(torch.Tensor, batch_pred_latents)
